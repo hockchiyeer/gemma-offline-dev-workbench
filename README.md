@@ -102,7 +102,7 @@ npm test
 ## Network & Security Notes
 
 - **Loopback by default.** Locally, the server binds to `127.0.0.1` and rejects requests whose `Host` header is not a loopback name (DNS-rebinding defense). To use GemmaVault from a phone on your Wi-Fi, opt in explicitly: `HOST=0.0.0.0 npm start`. The app has no login, so only do this on a trusted network; enable the vault passphrase first.
-- **Containers.** When `K_SERVICE` or `APP_URL` is set (managed container hosts) the server binds `0.0.0.0` by default and the Host-header and setup-endpoint guards relax accordingly; set `HOST=127.0.0.1` to force loopback.
+- **Containers.** When `K_SERVICE` or `APP_URL` is set (managed container hosts) the server binds `0.0.0.0` by default and the Host-header and setup-endpoint guards relax accordingly; set `HOST=127.0.0.1` to force loopback. In this mode it also omits `X-Frame-Options: DENY` and the CSP `frame-ancestors` directive so preview iframes can embed the app; local runs enforce both. Don't leave `APP_URL` set if framing should stay blocked.
 - **Installed PWA without the Node server.** The browser then talks to Ollama directly, which requires CORS. This is the one case where you start Ollama yourself: quit any running Ollama first, then run `OLLAMA_ORIGINS="http://localhost:3000" ollama serve`. (With `npm start` / `npm run dev` the built-in proxy handles CORS and this is not needed.)
 - **Encryption is opt-in.** Until you set a passphrase in *Vault DB*, data is stored unencrypted in IndexedDB. A lost passphrase cannot be recovered — keep a `.gvbackup`.
 - **Multiple tabs.** Locking one tab locks all; changing encryption or importing a backup reloads the others.
