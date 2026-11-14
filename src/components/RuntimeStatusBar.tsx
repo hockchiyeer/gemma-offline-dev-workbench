@@ -1,5 +1,5 @@
-import React from 'react';
-import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, XCircle } from 'lucide-react';
+import React, { useState } from 'react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Loader2, RefreshCw, XCircle } from 'lucide-react';
 import type { RuntimeStatus, RuntimeTone } from '../lib/runtimeStatus';
 
 interface RuntimeStatusBarProps {
@@ -52,6 +52,7 @@ export const RuntimeStatusBar: React.FC<RuntimeStatusBarProps> = ({
   onRecheck,
   onOpenSettings,
 }) => {
+  const [detailOpen, setDetailOpen] = useState(false);
   const styles = TONE_STYLES[status.tone];
   const pct =
     typeof status.percent === 'number'
@@ -78,10 +79,34 @@ export const RuntimeStatusBar: React.FC<RuntimeStatusBarProps> = ({
         <StatusIcon tone={status.tone} />
       </span>
       <div className="min-w-0 flex-1" title={`${status.label}. ${status.detail} ${checkedText}`}>
-        <span className="font-semibold">{status.label}</span>
-        {pct !== null && <span className="ml-1.5 font-mono tabular-nums">{pct}%</span>}
-        <span className="ml-2 hidden opacity-80 sm:inline">{status.detail}</span>
-        <span className="mt-0.5 block opacity-80 sm:hidden">{status.detail}</span>
+        {/* Desktop/tablet: inline headline + detail */}
+        <div className="hidden sm:block">
+          <span className="font-semibold">{status.label}</span>
+          {pct !== null && <span className="ml-1.5 font-mono tabular-nums">{pct}%</span>}
+          <span className="ml-2 opacity-80">{status.detail}</span>
+        </div>
+
+        {/* Phone: compact 1-line headline with tap-to-expand details */}
+        <button
+          type="button"
+          onClick={() => setDetailOpen((v) => !v)}
+          aria-expanded={detailOpen}
+          className="flex min-h-[36px] w-full items-center gap-1 text-left sm:hidden"
+        >
+          <span className="truncate font-semibold">{status.label}</span>
+          {pct !== null && <span className="shrink-0 font-mono tabular-nums">{pct}%</span>}
+          {status.detail && (
+            detailOpen ? (
+              <ChevronUp className="h-3.5 w-3.5 shrink-0 opacity-75" aria-hidden="true" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-75" aria-hidden="true" />
+            )
+          )}
+        </button>
+        {detailOpen && status.detail && (
+          <span className="pb-1 block opacity-85 sm:hidden">{status.detail}</span>
+        )}
+
         {pct !== null && (
           <span
             className="mt-1 block h-1 overflow-hidden rounded-full bg-black/10 dark:bg-white/10"

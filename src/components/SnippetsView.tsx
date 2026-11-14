@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   Check,
+  ChevronDown,
+  ChevronUp,
   Code2,
   Copy,
   Download,
@@ -9,6 +11,7 @@ import {
   Pencil,
   Plus,
   Search,
+  SlidersHorizontal,
   Sparkles,
   Star,
   Trash2,
@@ -25,6 +28,7 @@ interface SnippetsViewProps {
   onSaveSnippet: (snippet: CodeSnippet) => void | Promise<void>;
   onDeleteSnippet: (id: string) => Promise<void>;
   onSendToGemma: (snippet: CodeSnippet, actionPrompt: string) => void;
+  onMobileDetailChange?: (active: boolean) => void;
 }
 
 export const SnippetsView: React.FC<SnippetsViewProps> = ({
@@ -34,6 +38,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
   onSaveSnippet,
   onDeleteSnippet,
   onSendToGemma,
+  onMobileDetailChange,
 }) => {
   const confirm = useConfirm();
   const [search, setSearch] = useState('');
@@ -41,9 +46,15 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(snippets[0]?.id || null);
   const [mobileEditing, setMobileEditing] = useState(false);
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'edit' | 'preview'>('edit');
   const [copied, setCopied] = useState(false);
   const [tagInput, setTagInput] = useState('');
+
+  useEffect(() => {
+    onMobileDetailChange?.(mobileEditing);
+    return () => onMobileDetailChange?.(false);
+  }, [mobileEditing, onMobileDetailChange]);
 
   const filteredSnippets = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -296,13 +307,13 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
       >
         {activeSnippet ? (
           <>
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900/60">
-              <div className="flex min-w-0 flex-1 items-center gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 sm:px-4 sm:py-2.5 lg:flex-nowrap dark:border-slate-800 dark:bg-slate-900/60">
+              <div className="order-1 flex min-w-0 flex-1 items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setMobileEditing(false)}
                   aria-label="Back to snippets list"
-                  className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg border border-slate-200 text-slate-600 lg:hidden dark:border-slate-800 dark:text-slate-300"
+                  className="flex min-h-[40px] min-w-[40px] shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-600 lg:hidden dark:border-slate-800 dark:text-slate-300"
                 >
                   <ArrowLeft className="h-4 w-4" />
                 </button>
@@ -311,38 +322,11 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                   value={activeSnippet.title}
                   onChange={(e) => handleUpdate({ title: e.target.value })}
                   aria-label="Snippet title"
-                  className="min-w-0 flex-1 bg-transparent text-base font-semibold text-slate-900 outline-none focus:underline dark:text-white"
+                  className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-900 outline-none focus:underline sm:text-base dark:text-white"
                 />
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="flex items-center rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => setViewMode('edit')}
-                    className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-md px-2.5 text-xs font-medium ${
-                      viewMode === 'edit'
-                        ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
-                        : 'text-slate-600 dark:text-slate-400'
-                    }`}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setViewMode('preview')}
-                    className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-md px-2.5 text-xs font-medium ${
-                      viewMode === 'preview'
-                        ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
-                        : 'text-slate-600 dark:text-slate-400'
-                    }`}
-                  >
-                    <Eye className="h-3.5 w-3.5" />
-                    Highlight
-                  </button>
-                </div>
-
+              <div className="order-2 flex shrink-0 items-center gap-1.5 lg:order-3">
                 <button
                   type="button"
                   onClick={() => handleUpdate({ favorite: !activeSnippet.favorite })}
@@ -354,19 +338,6 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                       activeSnippet.favorite ? 'fill-amber-500 text-amber-500' : ''
                     }`}
                   />
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleCopyCode}
-                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-                >
-                  {copied ? (
-                    <Check className="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
-                  ) : (
-                    <Copy className="h-3.5 w-3.5" />
-                  )}
-                  {copied ? 'Copied' : 'Copy'}
                 </button>
 
                 <button
@@ -387,9 +358,80 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
+
+              <div className="order-3 flex w-full items-center justify-between gap-1.5 lg:order-2 lg:w-auto lg:justify-start lg:gap-2">
+                <div className="flex items-center gap-1.5">
+                  <div className="flex items-center rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('edit')}
+                      className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-md px-2 sm:px-2.5 text-xs font-medium whitespace-nowrap ${
+                        viewMode === 'edit'
+                          ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('preview')}
+                      className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-md px-2 sm:px-2.5 text-xs font-medium whitespace-nowrap ${
+                        viewMode === 'preview'
+                          ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                      Highlight
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleCopyCode}
+                    className="inline-flex min-h-[40px] lg:min-h-[36px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 sm:px-3 text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    {copied ? (
+                      <Check className="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                    {copied ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setMobileToolsOpen((v) => !v)}
+                  aria-expanded={mobileToolsOpen}
+                  aria-controls="snippet-tools-drawer"
+                  className={`inline-flex min-h-[40px] items-center gap-1 rounded-lg border px-2 sm:px-2.5 text-xs font-medium whitespace-nowrap shrink-0 md:hidden ${
+                    mobileToolsOpen
+                      ? 'border-teal-600/40 bg-teal-500/10 text-teal-700 dark:text-teal-300'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200'
+                  }`}
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                  <span>
+                    Tools<span className="hidden min-[390px]:inline"> &amp; AI</span>
+                  </span>
+                  {mobileToolsOpen ? (
+                    <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                </button>
+              </div>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/60 px-4 py-2.5 dark:border-slate-800 dark:bg-slate-900/30">
+            <div
+              id="snippet-tools-drawer"
+              className={`${
+                mobileToolsOpen ? 'flex' : 'hidden md:flex'
+              } flex-wrap items-center justify-between gap-2.5 border-b border-slate-200 bg-white/60 px-3 py-2.5 sm:px-4 dark:border-slate-800 dark:bg-slate-900/30`}
+            >
               <div className="flex flex-wrap items-center gap-2">
                 <select
                   aria-label="Snippet language"
@@ -447,7 +489,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 sm:space-y-4">
               {viewMode === 'edit' ? (
                 <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D1424]">
                   <textarea
@@ -455,8 +497,8 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                     onChange={(e) => handleUpdate({ code: e.target.value })}
                     spellCheck={false}
                     aria-label="Code editor"
-                    rows={18}
-                    className="block min-h-[340px] w-full resize-y bg-transparent p-4 font-mono text-[13px] leading-6 text-slate-900 outline-none dark:text-slate-100"
+                    rows={16}
+                    className="block min-h-[260px] sm:min-h-[340px] w-full resize-y bg-transparent p-3 sm:p-4 font-mono text-[13px] leading-6 text-slate-900 outline-none dark:text-slate-100"
                   />
                 </div>
               ) : (

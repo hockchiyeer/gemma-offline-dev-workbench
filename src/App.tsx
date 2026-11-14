@@ -449,6 +449,15 @@ function AppShell() {
     setActiveTab('assistant');
   };
 
+  const [mobileDetailActive, setMobileDetailActive] = useState(false);
+
+  // Clear mobile detail flag when switching away from snippets/docs.
+  useEffect(() => {
+    if (activeTab !== 'snippets' && activeTab !== 'docs') {
+      setMobileDetailActive(false);
+    }
+  }, [activeTab]);
+
   const handleSaveRuntimeConfig = async (next: LocalRuntimeConfig) => {
     await saveQueueRef.current.now('settings:runtime', () =>
       saveRuntimeConfig(next, cryptoKeyRef.current)
@@ -808,9 +817,13 @@ function AppShell() {
 
         {/* Active View Viewport */}
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {/* Tablet & Mobile Project Filter Strip (non-sticky so fixed mobile chrome stays <= 104px) */}
+          {/* Tablet & Mobile Project Filter Strip (hidden on mobile while an individual snippet/doc editor is open) */}
           {(activeTab === 'snippets' || activeTab === 'docs') && (
-            <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-white/80 px-4 py-2 xl:hidden dark:border-slate-800 dark:bg-slate-900/50">
+            <div
+              className={`${
+                mobileDetailActive ? 'hidden lg:flex' : 'flex'
+              } items-center justify-between gap-2 border-b border-slate-200 bg-white/80 px-4 py-2 xl:hidden dark:border-slate-800 dark:bg-slate-900/50`}
+            >
               <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                 <FolderKanban className="h-3.5 w-3.5 shrink-0" />
                 <span>Workspace</span>
@@ -861,6 +874,7 @@ function AppShell() {
                 onSaveSnippet={handleSaveSnippet}
                 onDeleteSnippet={handleDeleteSnippet}
                 onSendToGemma={handleSendToGemma}
+                onMobileDetailChange={setMobileDetailActive}
               />
             )}
 
@@ -873,6 +887,7 @@ function AppShell() {
                 onDeleteDoc={handleDeleteDoc}
                 onSaveSnippetFromCode={handleSaveSnippetFromCode}
                 onSendDocToGemma={handleSendDocToGemma}
+                onMobileDetailChange={setMobileDetailActive}
               />
             )}
 

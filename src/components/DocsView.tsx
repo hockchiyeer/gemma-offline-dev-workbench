@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   BookOpen,
+  ChevronDown,
+  ChevronUp,
   Columns2,
   Download,
   Eye,
@@ -9,6 +11,7 @@ import {
   Pin,
   Plus,
   Search,
+  SlidersHorizontal,
   Sparkles,
   Trash2,
 } from 'lucide-react';
@@ -24,6 +27,7 @@ interface DocsViewProps {
   onDeleteDoc: (id: string) => Promise<void>;
   onSaveSnippetFromCode: (code: string, language: SupportedLanguage) => Promise<void>;
   onSendDocToGemma: (doc: DocPage, prompt: string) => void;
+  onMobileDetailChange?: (active: boolean) => void;
 }
 
 const CATEGORIES: Array<{ id: 'all' | DocCategory; label: string }> = [
@@ -42,6 +46,7 @@ export const DocsView: React.FC<DocsViewProps> = ({
   onDeleteDoc,
   onSaveSnippetFromCode,
   onSendDocToGemma,
+  onMobileDetailChange,
 }) => {
   const confirm = useConfirm();
   const [search, setSearch] = useState('');
@@ -49,6 +54,12 @@ export const DocsView: React.FC<DocsViewProps> = ({
   const [selectedId, setSelectedId] = useState<string | null>(docs[0]?.id || null);
   const [mode, setMode] = useState<'preview' | 'edit' | 'split'>('split');
   const [mobileViewing, setMobileViewing] = useState(false);
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
+
+  useEffect(() => {
+    onMobileDetailChange?.(mobileViewing);
+    return () => onMobileDetailChange?.(false);
+  }, [mobileViewing, onMobileDetailChange]);
 
   const filteredDocs = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -264,13 +275,13 @@ export const DocsView: React.FC<DocsViewProps> = ({
       >
         {activeDoc ? (
           <>
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900/60">
-              <div className="flex min-w-0 flex-1 items-center gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 sm:px-4 sm:py-2.5 lg:flex-nowrap dark:border-slate-800 dark:bg-slate-900/60">
+              <div className="order-1 flex min-w-0 flex-1 items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setMobileViewing(false)}
                   aria-label="Back to docs list"
-                  className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg border border-slate-200 text-slate-600 lg:hidden dark:border-slate-800 dark:text-slate-300"
+                  className="flex min-h-[40px] min-w-[40px] shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-600 lg:hidden dark:border-slate-800 dark:text-slate-300"
                 >
                   <ArrowLeft className="h-4 w-4" />
                 </button>
@@ -279,50 +290,11 @@ export const DocsView: React.FC<DocsViewProps> = ({
                   value={activeDoc.title}
                   onChange={(e) => handleUpdate({ title: e.target.value })}
                   aria-label="Document title"
-                  className="min-w-0 flex-1 bg-transparent text-base font-semibold text-slate-900 outline-none focus:underline dark:text-white"
+                  className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-900 outline-none focus:underline sm:text-base dark:text-white"
                 />
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="flex items-center rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => setMode('edit')}
-                    className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1 rounded-md px-2.5 text-xs font-medium ${
-                      mode === 'edit'
-                        ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
-                        : 'text-slate-600 dark:text-slate-400'
-                    }`}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                    Write
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMode('split')}
-                    className={`hidden min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1 rounded-md px-2.5 text-xs font-medium md:inline-flex ${
-                      mode === 'split'
-                        ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
-                        : 'text-slate-600 dark:text-slate-400'
-                    }`}
-                  >
-                    <Columns2 className="h-3.5 w-3.5" />
-                    Split
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMode('preview')}
-                    className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1 rounded-md px-2.5 text-xs font-medium ${
-                      mode === 'preview'
-                        ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
-                        : 'text-slate-600 dark:text-slate-400'
-                    }`}
-                  >
-                    <Eye className="h-3.5 w-3.5" />
-                    Preview
-                  </button>
-                </div>
-
+              <div className="order-2 flex shrink-0 items-center gap-1.5 lg:order-3">
                 <button
                   type="button"
                   onClick={() => handleUpdate({ pinned: !activeDoc.pinned })}
@@ -354,9 +326,75 @@ export const DocsView: React.FC<DocsViewProps> = ({
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
+
+              <div className="order-3 flex w-full items-center justify-between gap-2 lg:order-2 lg:w-auto lg:justify-start">
+                <div className="flex items-center rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setMode('edit')}
+                    className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1 rounded-md px-2.5 text-xs font-medium whitespace-nowrap ${
+                      mode === 'edit'
+                        ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                        : 'text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                    Write
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMode('split')}
+                    className={`hidden min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1 rounded-md px-2.5 text-xs font-medium whitespace-nowrap md:inline-flex ${
+                      mode === 'split'
+                        ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                        : 'text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    <Columns2 className="h-3.5 w-3.5" />
+                    Split
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMode('preview')}
+                    className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1 rounded-md px-2.5 text-xs font-medium whitespace-nowrap ${
+                      mode === 'preview'
+                        ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
+                        : 'text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    <Eye className="h-3.5 w-3.5" />
+                    Preview
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setMobileToolsOpen((v) => !v)}
+                  aria-expanded={mobileToolsOpen}
+                  aria-controls="doc-tools-drawer"
+                  className={`inline-flex min-h-[40px] items-center gap-1 rounded-lg border px-2.5 text-xs font-medium whitespace-nowrap shrink-0 md:hidden ${
+                    mobileToolsOpen
+                      ? 'border-teal-600/40 bg-teal-500/10 text-teal-700 dark:text-teal-300'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200'
+                  }`}
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                  <span>Tools & AI</span>
+                  {mobileToolsOpen ? (
+                    <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                </button>
+              </div>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/60 px-4 py-2.5 dark:border-slate-800 dark:bg-slate-900/30">
+            <div
+              id="doc-tools-drawer"
+              className={`${
+                mobileToolsOpen ? 'flex' : 'hidden md:flex'
+              } flex-wrap items-center justify-between gap-2.5 border-b border-slate-200 bg-white/60 px-3 py-2.5 sm:px-4 dark:border-slate-800 dark:bg-slate-900/30`}
+            >
               <div className="flex flex-wrap items-center gap-2">
                 <select
                   aria-label="Document category"
@@ -403,18 +441,20 @@ export const DocsView: React.FC<DocsViewProps> = ({
               </button>
             </div>
 
-            <div className="flex min-h-0 flex-1 overflow-hidden">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
               {(mode === 'edit' || mode === 'split') && (
                 <div
-                  className={`flex-1 overflow-y-auto p-4 ${
-                    mode === 'split' ? 'border-r border-slate-200 dark:border-slate-800' : ''
+                  className={`flex-1 overflow-y-auto p-3 sm:p-4 ${
+                    mode === 'split'
+                      ? 'border-b border-slate-200 md:border-r md:border-b-0 dark:border-slate-800'
+                      : ''
                   }`}
                 >
                   <textarea
                     value={activeDoc.content}
                     onChange={(e) => handleUpdate({ content: e.target.value })}
                     aria-label="Markdown editor"
-                    className="h-full min-h-[420px] w-full resize-none rounded-xl border border-slate-200 bg-white p-4 font-mono text-[13px] leading-6 text-slate-900 outline-none focus:border-teal-600 dark:border-slate-800 dark:bg-[#0D1424] dark:text-slate-100"
+                    className="h-full min-h-[220px] md:min-h-[420px] w-full resize-none rounded-xl border border-slate-200 bg-white p-3 sm:p-4 font-mono text-[13px] leading-6 text-slate-900 outline-none focus:border-teal-600 dark:border-slate-800 dark:bg-[#0D1424] dark:text-slate-100"
                   />
                 </div>
               )}

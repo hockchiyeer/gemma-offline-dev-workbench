@@ -8,6 +8,7 @@ Offline-first, self-sustaining coding workbench powered by locally installed **G
 - **Automatic Gemma Ranking**: Detects locally installed models and auto-selects the most capable one by blending generation and size (newest generation wins at equal size; Gemma 4 12B ≈ Gemma 3 27B class, so a large older model can still beat a tiny new one). Embedding/safety variants (`embeddinggemma`, `shieldgemma`) are never auto-selected, and future `gemma5+` tags rank automatically.
 - **Encrypted Local Database**: Stores snippets, Markdown docs, projects, and chat sessions in IndexedDB with optional **AES-256-GCM** encryption (`PBKDF2-SHA256`, 600,000 iterations, strict v2 per-record AAD binding, auto-lock timeout, passphrase rotation, and `.gvbackup` portable backups).
 - **Live Local-LLM Status Bar**: A bar under the header on every tab says whether the local LLM is up, starting, installing, or down, with the model name and Ollama version, so a loaded web page is never mistaken for a working AI. See [Is the local LLM up?](#is-the-local-llm-up).
+- **Reasoning You Can See and Control**: Gemma 4 "thinks" before it answers. The chat shows live progress (loading, reasoning, generating, with elapsed seconds) and a collapsible **Show reasoning** trace that is saved with each reply. **Runtime settings → Reasoning (Ollama)** can switch thinking off for much faster answers on CPU-only PCs. See [Slow or stuck answers](#slow-or-stuck-answers).
 - **Responsive Desktop & Mobile PWA**: Installable standalone Progressive Web App with bundled offline fonts (`Plus Jakarta Sans`, `DM Sans`, `JetBrains Mono`), dual light/dark themes, and adaptive layouts for desktop monitors and mobile viewports.
 
 ## Quick start
@@ -92,6 +93,36 @@ Pick by RAM (sizes are approximate; tags change, so confirm with `ollama list` o
 
 Prefer **llama.cpp / LM Studio**? Start an OpenAI-compatible server (`llama-server -m gemma-4-e4b-it-Q4_K_M.gguf --port 1234 --ctx-size 8192`) and choose *OpenAI-compatible* in Runtime settings. The status bar then shows the model but no Ollama version, and setup and `--check` do not apply.
 
+## Slow or stuck answers
+
+Gemma 4 normally *reasons* before it writes the answer. On a CPU-only machine that phase can take minutes for a simple question, so the chat shows what it is doing while you wait:
+
+| Chat shows | Meaning |
+| --- | --- |
+| `Loading model into memory… Ns` | Nothing has come back yet: the model is loading or reading your prompt. The first request after idle is the slowest. |
+| `Reasoning… Ns` | The model is thinking. Open **Show reasoning** to watch it; the answer follows. |
+| `Generating… Ns` | The answer is streaming. |
+
+**Make it faster**
+
+1. **Runtime settings → Reasoning (Ollama) → Off.** Sends `think: false`, so the model answers directly. *Auto* (the default) lets the model decide and gives the best quality. This setting applies to Ollama only; OpenAI-compatible servers ignore it.
+2. **Check where the model runs.** While it is loaded, `ollama ps` shows CPU or GPU in the `PROCESSOR` column.
+3. **Use a smaller model**, for example `gemma4:e2b` (see [Choosing a model](#choosing-a-model)). `ollama run gemma4:e4b --verbose "hello"` prints the speed in tokens/s; a CPU-only rate below about 5 tokens/s will always feel slow.
+
+**Token budget.** *Max Output Tokens* is the length of the answer. In *Auto*, the app asks Ollama for 4096 extra tokens so reasoning cannot use up the answer's budget, and it reserves that room from the *Context Window* when trimming long chats or attached snippets. With *Off*, no extra room is reserved.
+
+**Stop and timeouts.** The red stop button keeps whatever has streamed so far. If nothing arrives for 5 minutes at the start, or the stream goes silent for 90 seconds mid-reply, the request is cancelled with an error instead of waiting forever.
+
+**Messages you may see**
+
+| Message | Fix |
+| --- | --- |
+| `…used its entire token budget on reasoning and produced no answer` | Raise *Max Output Tokens*, or set Reasoning to Off. |
+| `…returned an empty answer with Reasoning turned off` | This Ollama build needs thinking on: set Reasoning back to Auto. |
+| `The local model stopped responding (no data received)` | Check that Ollama is running and the model fits in RAM (`ollama ps`), then retry. |
+
+**Page looks unchanged after an update.** The installed PWA caches the app. Hard-refresh with Ctrl+Shift+R. If the old behaviour persists, open DevTools → Application → Service Workers and click **Unregister**, then reload. Do **not** use "Clear site data": it also deletes your IndexedDB vault.
+
 ## Verify & test
 
 ```bash
@@ -105,4 +136,5 @@ npm test
 - **Containers.** When `K_SERVICE` or `APP_URL` is set (managed container hosts) the server binds `0.0.0.0` by default and the Host-header and setup-endpoint guards relax accordingly; set `HOST=127.0.0.1` to force loopback. In this mode it also omits `X-Frame-Options: DENY` and the CSP `frame-ancestors` directive so preview iframes can embed the app; local runs enforce both. Don't leave `APP_URL` set if framing should stay blocked.
 - **Installed PWA without the Node server.** The browser then talks to Ollama directly, which requires CORS. This is the one case where you start Ollama yourself: quit any running Ollama first, then run `OLLAMA_ORIGINS="http://localhost:3000" ollama serve`. (With `npm start` / `npm run dev` the built-in proxy handles CORS and this is not needed.)
 - **Encryption is opt-in.** Until you set a passphrase in *Vault DB*, data is stored unencrypted in IndexedDB. A lost passphrase cannot be recovered — keep a `.gvbackup`.
+- **Reasoning traces are stored.** A reply's reasoning ("Show reasoning") is saved with the message in the local database, so it is covered by vault encryption and included in `.gvbackup` files. Setting Reasoning to Off stops new traces from being created.
 - **Multiple tabs.** Locking one tab locks all; changing encryption or importing a backup reloads the others.
