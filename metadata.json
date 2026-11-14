@@ -1,0 +1,6 @@
+{
+  "name": "GemmaVault",
+  "description": "Offline-first local AI coding workbench powered by locally installed Google Gemma models with an encrypted IndexedDB database for code snippets and project documentation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

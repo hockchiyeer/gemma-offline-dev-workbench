@@ -1,0 +1,470 @@
+import type { ChatMessage, GemmaModelInfo, LocalRuntimeConfig } from '../types/vault';
+
+export interface ProbeResult {
+  connected: boolean;
+  transport: 'direct' | 'proxy' | 'none';
+  models: GemmaModelInfo[];
+  recommendedModel: GemmaModelInfo | null;
+  error?: string;
+}
+
+export interface WebGPUStatus {
+  supported: boolean;
+  adapterName?: string;
+}
+
+export interface RecommendedModelSpec {
+  tag: string;
+  note: string;
+}
+
+export const RECOMMENDED_GEMMA_MODELS: RecommendedModelSpec[] = [
+  { tag: 'gemma4:31b', note: 'Flagship Google Gemma 4 dense reasoning & coding (24 GB+ RAM)' },
+  { tag: 'gemma4:26b', note: 'Gemma 4 26B MoE high-speed coding & architecture (18 GB RAM)' },
+  { tag: 'gemma4:12b', note: 'Gemma 4 12B Unified mid-tier coding model between E4B and 26B (~8 GB download)' },
+  { tag: 'gemma4:e4b', note: 'Balanced everyday Gemma 4 coding model for laptops (6–8 GB RAM)' },
+  { tag: 'gemma4:e2b', note: 'Ultra-light Gemma 4 edge model for low-RAM devices (3–4 GB RAM)' },
+  { tag: 'gemma3n:e4b', note: 'Gemma 3n multimodal-ready efficient local edge model (5 GB RAM)' },
+  { tag: 'gemma3:12b', note: 'Gemma 3 12B coding & refactoring workhorse (9 GB RAM)' },
+  { tag: 'codegemma:7b', note: 'Code-specialized model for completion & fill-in-middle (6 GB RAM)' },
+];
+
+export function isLoopbackBaseUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+export function parseParamBillions(lower: string): { label: string; billions: number } | null {
+  const paramMatch = lower.match(/(?:^|[:\-_/\s])(e?\d+(?:\.\d+)?b)(?:$|[:\-_/\s])/);
+  if (!paramMatch) return null;
+  const rawToken = paramMatch[1];
+  const numeric = parseFloat(rawToken.replace(/^e/, ''));
+  if (Number.isNaN(numeric)) return null;
+  return { label: rawToken.toUpperCase(), billions: numeric };
+}
+
+// Rank free Google Gemma models from most advanced (Gemma 4) to lightest
+export function classifyAndRankModel(
+  name: string,
+  sizeBytes?: number,
+  quantization?: string
+): GemmaModelInfo {
+  const lower = name.toLowerCase();
+  let family: GemmaModelInfo['family'] = 'other';
+  let rankScore = 10;
+
+  if (/(?:^|[/:_-])gemma-?4(?:$|[/:_.-])/.test(lower) || lower.includes('gemma4')) {
+    family = 'gemma4';
+    rankScore = 2000;
+  } else if (/(?:^|[/:_-])gemma-?3n(?:$|[/:_.-])/.test(lower) || lower.includes('gemma3n')) {
+    family = 'gemma3n';
+    rankScore = 1100;
+  } else if (/(?:^|[/:_-])gemma-?3(?:$|[/:_.-])/.test(lower) || lower.includes('gemma3')) {
+    family = 'gemma3';
+    rankScore = 1000;
+  } else if (/(?:^|[/:_-])gemma-?2(?:$|[/:_.-])/.test(lower) || lower.includes('gemma2')) {
+    family = 'gemma2';
+    rankScore = 700;
+  } else if (lower.includes('codegemma')) {
+    family = 'codegemma';
+    rankScore = 650;
+  } else if (lower.includes('gemma')) {
+    family = 'gemma';
+    rankScore = 500;
+  }
+
+  let parameterLabel = '';
+  const parsedParam = parseParamBillions(lower);
+  if (parsedParam) {
+    parameterLabel = parsedParam.label;
+    rankScore += parsedParam.billions * 10;
+  } else if (family === 'gemma4' && !lower.includes(':')) {
+    // Bare "gemma4" tag in Ollama aliases to E4B
+    parameterLabel = 'E4B';
+    rankScore += 40;
+  }
+
+  return {
+    id: name,
+    name,
+    family,
+    parameterLabel,
+    sizeBytes,
+    quantization,
+    rankScore,
+  };
+}
+
+export async function inspectWebGPU(): Promise<WebGPUStatus> {
+  try {
+    const nav = navigator as unknown as {
+      gpu?: {
+        requestAdapter: () => Promise<{ info?: { device?: string; architecture?: string } } | null>;
+      };
+    };
+    if (!nav.gpu) return { supported: false };
+    const adapter = await nav.gpu.requestAdapter();
+    if (!adapter) return { supported: false };
+    const info = adapter.info;
+    const adapterName =
+      [info?.architecture, info?.device].filter(Boolean).join(' · ') || 'WebGPU Adapter Ready';
+    return { supported: true, adapterName };
+  } catch {
+    return { supported: false };
+  }
+}
+
+function normalizeBaseUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '');
+}
+
+async function parseModelsResponse(
+  kind: LocalRuntimeConfig['kind'],
+  data: unknown
+): Promise<GemmaModelInfo[]> {
+  const rawList: Array<{ name: string; size?: number; quant?: string }> = [];
+
+  if (kind === 'ollama') {
+    const models =
+      (
+        data as {
+          models?: Array<{
+            name?: string;
+            model?: string;
+            size?: number;
+            details?: { quantization_level?: string };
+          }>;
+        }
+      )?.models || [];
+    for (const m of models) {
+      const id = m.name || m.model;
+      if (id) {
+        rawList.push({
+          name: id,
+          size: m.size,
+          quant: m.details?.quantization_level,
+        });
+      }
+    }
+  } else {
+    const models = (data as { data?: Array<{ id?: string }> })?.data || [];
+    for (const m of models) {
+      if (m.id) rawList.push({ name: m.id });
+    }
+  }
+
+  return rawList
+    .map((m) => classifyAndRankModel(m.name, m.size, m.quant))
+    .sort((a, b) => b.rankScore - a.rankScore);
+}
+
+export async function probeLocalGemmaRuntime(config: LocalRuntimeConfig): Promise<ProbeResult> {
+  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  if (!isLoopbackBaseUrl(baseUrl)) {
+    return {
+      connected: false,
+      transport: 'none',
+      models: [],
+      recommendedModel: null,
+      error: 'Endpoint must target localhost or 127.0.0.1 to guarantee offline-only execution.',
+    };
+  }
+
+  const endpointPath = config.kind === 'openai' ? '/v1/models' : '/api/tags';
+
+  // 1. Try direct browser loopback connection first (works in pure offline standalone PWA)
+  const directController = new AbortController();
+  const directTimer = setTimeout(() => directController.abort(), 1800);
+  try {
+    const resp = await fetch(`${baseUrl}${endpointPath}`, { signal: directController.signal });
+    if (resp.ok) {
+      const json = await resp.json();
+      const models = await parseModelsResponse(config.kind, json);
+      const gemmaModels = models.filter((m) => m.family !== 'other');
+      const recommendedModel = gemmaModels[0] || models[0] || null;
+      return {
+        connected: true,
+        transport: 'direct',
+        models,
+        recommendedModel,
+      };
+    }
+  } catch {
+    // Fall through to local Express loopback proxy
+  } finally {
+    clearTimeout(directTimer);
+  }
+
+  // 2. Try same-origin loopback proxy (bypasses Ollama CORS when running via server.ts)
+  const proxyController = new AbortController();
+  const proxyTimer = setTimeout(() => proxyController.abort(), 2200);
+  try {
+    const resp = await fetch('/api/local-ai/probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseUrl, kind: config.kind }),
+      signal: proxyController.signal,
+    });
+    if (resp.ok) {
+      const wrapper = (await resp.json()) as { ok?: boolean; data?: unknown };
+      if (wrapper.ok && wrapper.data) {
+        const models = await parseModelsResponse(config.kind, wrapper.data);
+        const gemmaModels = models.filter((m) => m.family !== 'other');
+        const recommendedModel = gemmaModels[0] || models[0] || null;
+        return {
+          connected: true,
+          transport: 'proxy',
+          models,
+          recommendedModel,
+        };
+      }
+    }
+  } catch {
+    // Both paths unreachable
+  } finally {
+    clearTimeout(proxyTimer);
+  }
+
+  return {
+    connected: false,
+    transport: 'none',
+    models: [],
+    recommendedModel: null,
+    error: `No local Gemma runtime detected at ${baseUrl}. Start Ollama or LM Studio on this device.`,
+  };
+}
+
+export interface StreamGemmaOptions {
+  config: LocalRuntimeConfig;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  transportHint?: 'direct' | 'proxy' | 'none';
+  signal: AbortSignal;
+  onToken: (partialText: string) => void;
+}
+
+export async function streamLocalGemmaChat({
+  config,
+  messages,
+  transportHint,
+  signal,
+  onToken,
+}: StreamGemmaOptions): Promise<string> {
+  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  if (!isLoopbackBaseUrl(baseUrl)) {
+    throw new Error('Blocked non-local endpoint. Configure a localhost or 127.0.0.1 URL.');
+  }
+
+  const numCtx = config.contextTokens ?? 8192;
+  const payload =
+    config.kind === 'ollama'
+      ? {
+          model: config.selectedModel,
+          messages,
+          stream: true,
+          options: {
+            temperature: config.temperature,
+            num_predict: config.maxTokens,
+            num_ctx: numCtx,
+          },
+        }
+      : {
+          model: config.selectedModel,
+          messages,
+          stream: true,
+          temperature: config.temperature,
+          max_tokens: config.maxTokens,
+        };
+
+  let response: Response | null = null;
+
+  if (transportHint !== 'proxy') {
+    try {
+      const directPath = config.kind === 'openai' ? '/v1/chat/completions' : '/api/chat';
+      // Keep any actual HTTP response (including 4xx model errors) so real runtime errors surface.
+      response = await fetch(`${baseUrl}${directPath}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal,
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw err;
+      }
+      response = null;
+    }
+  }
+
+  if (!response) {
+    response = await fetch('/api/local-ai/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        baseUrl,
+        kind: config.kind,
+        payload,
+      }),
+      signal,
+    });
+  }
+
+  if (!response.ok || !response.body) {
+    let errDetail = `Local Gemma runtime error (HTTP ${response.status})`;
+    try {
+      const errJson = await response.json();
+      if (errJson?.error) errDetail = typeof errJson.error === 'string' ? errJson.error : errJson.error.message || errDetail;
+    } catch {
+      // ignore
+    }
+    throw new Error(errDetail);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let accumulated = '';
+
+  const processLine = (rawLine: string) => {
+    const line = rawLine.trim();
+    if (!line) return;
+
+    if (config.kind === 'ollama') {
+      try {
+        const parsed = JSON.parse(line) as { message?: { content?: string }; error?: string };
+        if (parsed.error) throw new Error(parsed.error);
+        if (parsed.message?.content) {
+          accumulated += parsed.message.content;
+          onToken(accumulated);
+        }
+      } catch (err) {
+        if (err instanceof Error && line.includes('"error"')) {
+          throw err;
+        }
+      }
+    } else {
+      if (!line.startsWith('data:')) return;
+      const dataStr = line.slice(5).trim();
+      if (dataStr === '[DONE]') return;
+      try {
+        const parsed = JSON.parse(dataStr) as {
+          choices?: Array<{ delta?: { content?: string } }>;
+          error?: { message?: string };
+        };
+        if (parsed.error?.message) {
+          throw new Error(parsed.error.message);
+        }
+        const chunk = parsed.choices?.[0]?.delta?.content;
+        if (chunk) {
+          accumulated += chunk;
+          onToken(accumulated);
+        }
+      } catch (err) {
+        if (err instanceof Error && line.includes('"error"')) {
+          throw err;
+        }
+      }
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      processLine(line);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    processLine(buffer);
+  }
+
+  return accumulated;
+}
+
+export interface BuiltGemmaPayload {
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  truncated: boolean;
+}
+
+const DEFAULT_MAX_CONTEXT_CHARS = 24_000;
+
+export function buildGemmaMessages(
+  systemPrompt: string,
+  history: ChatMessage[],
+  contextBlocks: Array<{ title: string; kind: string; content: string }>,
+  budget?: number | { contextTokens?: number; reserveForReply?: number }
+): BuiltGemmaPayload {
+  let maxChars = DEFAULT_MAX_CONTEXT_CHARS;
+  if (typeof budget === 'number') {
+    maxChars = Math.max(2000, budget);
+  } else if (budget && typeof budget === 'object') {
+    const ctxTokens = budget.contextTokens ?? 8192;
+    const reserve = budget.reserveForReply ?? 2048;
+    const usableTokens = Math.max(1024, ctxTokens - reserve);
+    maxChars = Math.max(4000, Math.floor(usableTokens * 3.2));
+  }
+
+  let truncated = false;
+  const maxContextChars = Math.floor(maxChars * 0.55);
+
+  let contextText = '';
+  if (contextBlocks.length > 0) {
+    const parts: string[] = [];
+    let used = 0;
+    for (const block of contextBlocks) {
+      const formatted = `--- ${block.kind.toUpperCase()}: ${block.title} ---\n${block.content}`;
+      if (used + formatted.length <= maxContextChars) {
+        parts.push(formatted);
+        used += formatted.length;
+      } else {
+        const remaining = Math.max(200, maxContextChars - used);
+        parts.push(`${formatted.slice(0, remaining)}\n...[truncated to fit local context window]`);
+        truncated = true;
+        break;
+      }
+    }
+    contextText = `\n\nAttached Local Vault Context:\n${parts.join('\n\n')}`;
+  }
+
+  const systemMessage = {
+    role: 'system' as const,
+    content: `${systemPrompt}${contextText}`,
+  };
+
+  let remainingBudget = Math.max(2000, maxChars - systemMessage.content.length);
+  const selectedHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+
+  // Keep the most recent turns within the character budget
+  const recentSlice = history.slice(-16);
+  for (let i = recentSlice.length - 1; i >= 0; i--) {
+    const msg = recentSlice[i];
+    if (msg.content.length <= remainingBudget || selectedHistory.length === 0) {
+      const content =
+        msg.content.length <= remainingBudget
+          ? msg.content
+          : `${msg.content.slice(0, remainingBudget)}\n...[trimmed]`;
+      if (content.length < msg.content.length) truncated = true;
+      selectedHistory.unshift({ role: msg.role, content });
+      remainingBudget -= content.length;
+    } else {
+      truncated = true;
+      break;
+    }
+  }
+
+  return {
+    messages: [systemMessage, ...selectedHistory],
+    truncated,
+  };
+}
