@@ -323,6 +323,11 @@ export interface StreamGemmaOptions {
 
 /** Gemma 4 spends tokens on reasoning before answering; give it headroom so the answer is not starved. */
 export const THINKING_TOKEN_HEADROOM = 4096;
+
+/** Extra tokens to allow for reasoning; none are needed when reasoning is switched off. */
+export function thinkingHeadroom(config: Pick<LocalRuntimeConfig, 'reasoning'>): number {
+  return config.reasoning === 'off' ? 0 : THINKING_TOKEN_HEADROOM;
+}
 const FIRST_BYTE_TIMEOUT_MS = 5 * 60_000; // cold model load can be slow on CPU / low RAM
 const IDLE_TIMEOUT_MS = 90_000;
 
@@ -347,13 +352,15 @@ export async function streamLocalGemmaChat({
   }
 
   const numCtx = config.contextTokens ?? 8192;
-  const maxTokens = (config.maxTokens ?? 2048) + THINKING_TOKEN_HEADROOM;
+  const maxTokens = (config.maxTokens ?? 2048) + thinkingHeadroom(config);
   const payload =
     config.kind === 'ollama'
       ? {
           model: config.selectedModel,
           messages,
           stream: true,
+          // Ollama only: skip the reasoning phase entirely (much faster on CPU-only machines).
+          ...(config.reasoning === 'off' ? { think: false } : {}),
           options: {
             temperature: config.temperature,
             num_predict: maxTokens,
@@ -531,6 +538,12 @@ export async function streamLocalGemmaChat({
       }
       throw new Error(
         'The model finished reasoning without producing a final answer. Try rephrasing or increasing "Max tokens" in Model Setup.'
+      );
+    }
+
+    if (!accumulated.trim() && !thinking.trim() && config.reasoning === 'off' && config.kind === 'ollama') {
+      throw new Error(
+        'The model returned an empty answer with Reasoning turned off. Some Gemma builds need reasoning on: set Reasoning to "Auto" in Model Setup and retry.'
       );
     }
 

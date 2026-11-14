@@ -328,6 +328,26 @@ export const LocalGemmaSetupModal: React.FC<LocalGemmaSetupModalProps> = ({
 
           <div>
             <label
+              htmlFor="runtime-reasoning"
+              className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+            >
+              Reasoning (Ollama)
+            </label>
+            <select
+              id="runtime-reasoning"
+              value={draft.reasoning ?? 'auto'}
+              onChange={(e) =>
+                setDraft({ ...draft, reasoning: e.target.value === 'off' ? 'off' : 'auto' })
+              }
+              className="mt-1.5 min-h-[44px] w-full rounded-xl border border-slate-300 bg-slate-50 px-3.5 text-xs text-slate-900 outline-none focus:border-teal-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            >
+              <option value="auto">Auto — model thinks first (best quality, slower)</option>
+              <option value="off">Off — answer directly (fastest, recommended on CPU-only PCs)</option>
+            </select>
+          </div>
+
+          <div>
+            <label
               htmlFor="runtime-system-prompt"
               className="block text-xs font-medium text-slate-700 dark:text-slate-300"
             >

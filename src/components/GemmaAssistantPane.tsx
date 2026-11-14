@@ -13,7 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import {
-  THINKING_TOKEN_HEADROOM,
+  thinkingHeadroom,
   buildGemmaMessages,
   streamLocalGemmaChat,
   type ProbeResult,
@@ -250,7 +250,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         resolveContextBlocks(usedAttachments),
         {
           contextTokens: runtimeConfig.contextTokens,
-          reserveForReply: runtimeConfig.maxTokens + THINKING_TOKEN_HEADROOM,
+          reserveForReply: runtimeConfig.maxTokens + thinkingHeadroom(runtimeConfig),
         }
       );
       if (built.truncated) {

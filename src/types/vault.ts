@@ -87,6 +87,11 @@ export interface LocalRuntimeConfig {
   maxTokens: number;
   /** Context window requested from local runtimes such as Ollama (num_ctx). */
   contextTokens?: number;
+  /**
+   * Reasoning ("thinking") mode for Ollama models that support it, such as Gemma 4.
+   * 'auto' lets the model decide (best quality, slow on CPU); 'off' sends `think: false`.
+   */
+  reasoning?: 'auto' | 'off';
   systemPrompt: string;
 }
 

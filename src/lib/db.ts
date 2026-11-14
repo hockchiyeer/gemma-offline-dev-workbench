@@ -58,6 +58,7 @@ export const DEFAULT_RUNTIME_CONFIG: LocalRuntimeConfig = {
   temperature: 0.25,
   maxTokens: 2048,
   contextTokens: 8192,
+  reasoning: 'auto',
   systemPrompt:
     'You are an expert software engineer running locally on Google Gemma. Provide concise, accurate, production-ready code and architectural guidance. Always specify the language on fenced code blocks.',
 };
@@ -95,6 +96,7 @@ export function sanitizeRuntimeConfig(raw?: Partial<LocalRuntimeConfig> | null):
   const contextTokens = Math.round(
     clampNumber(raw?.contextTokens, DEFAULT_RUNTIME_CONFIG.contextTokens ?? 8192, 2048, 262144)
   );
+  const reasoning = raw?.reasoning === 'off' ? 'off' : 'auto';
   const systemPrompt =
     typeof raw?.systemPrompt === 'string' && raw.systemPrompt.trim()
       ? raw.systemPrompt
@@ -107,6 +109,7 @@ export function sanitizeRuntimeConfig(raw?: Partial<LocalRuntimeConfig> | null):
     temperature,
     maxTokens,
     contextTokens,
+    reasoning,
     systemPrompt,
   };
 }
