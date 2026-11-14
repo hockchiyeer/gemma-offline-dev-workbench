@@ -93,6 +93,9 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   const [streamingDraft, setStreamingDraft] = useState<{ msgId: string; text: string } | null>(
     null
   );
+  const [thinkingText, setThinkingText] = useState('');
+  const [modelLoaded, setModelLoaded] = useState(false);
+  const [waitSeconds, setWaitSeconds] = useState(0);
   const [contextTrimmed, setContextTrimmed] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -111,6 +114,16 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       abortRef.current?.abort();
     };
   }, []);
+
+  // Elapsed-time ticker so a slow cold start is visible instead of looking frozen.
+  useEffect(() => {
+    if (!streaming) {
+      setWaitSeconds(0);
+      return;
+    }
+    const id = setInterval(() => setWaitSeconds((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [streaming]);
 
   useEffect(() => {
     scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -218,6 +231,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     abortRef.current = controller;
     latestDraftRef.current = '';
     setStreamingDraft({ msgId: assistantMsgId, text: '' });
+    setThinkingText('');
+    setModelLoaded(false);
     setStreaming(true);
     const startedAt = performance.now();
 
@@ -240,6 +255,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         messages: built.messages,
         transportHint: probe.transport,
         signal: controller.signal,
+        onFirstByte: () => setModelLoaded(true),
+        onThinking: (t) => setThinkingText(t),
         onToken: (partial) => {
           latestDraftRef.current = partial;
           setStreamingDraft({ msgId: assistantMsgId, text: partial });
@@ -262,7 +279,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       };
       await onUpdateSession(completedSession, { immediate: true });
     } catch (err) {
-      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      const isAbort =
+        Boolean(err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError');
       const partial = latestDraftRef.current.trim();
       if (isAbort) {
         const stoppedSession: ChatSession = {
@@ -296,6 +314,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       abortRef.current = null;
       latestDraftRef.current = '';
       setStreamingDraft(null);
+      setThinkingText('');
+      setModelLoaded(false);
       setStreaming(false);
     }
   };
@@ -474,13 +494,41 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                     {displayContent}
                   </p>
                 ) : displayContent ? (
-                  <MarkdownRenderer
-                    content={displayContent}
-                    onSaveSnippet={onSaveSnippetFromCode}
-                  />
+                  <div className="space-y-3">
+                    {streamingDraft && streamingDraft.msgId === msg.id && thinkingText && (
+                      <details className="rounded-lg border border-slate-200 p-2 font-mono text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                        <summary className="cursor-pointer select-none">Show reasoning</summary>
+                        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap">
+                          {thinkingText}
+                        </pre>
+                      </details>
+                    )}
+                    <MarkdownRenderer
+                      content={displayContent}
+                      onSaveSnippet={onSaveSnippetFromCode}
+                    />
+                  </div>
+                ) : streamingDraft && streamingDraft.msgId === msg.id ? (
+                  <div className="space-y-2 font-mono text-xs text-slate-500 dark:text-slate-400">
+                    <p>
+                      {!modelLoaded
+                        ? `Loading model into memory… ${waitSeconds}s (first request after idle can take a minute)`
+                        : thinkingText
+                          ? `Reasoning… ${waitSeconds}s`
+                          : `Generating… ${waitSeconds}s`}
+                    </p>
+                    {thinkingText && (
+                      <details className="rounded-lg border border-slate-200 p-2 dark:border-slate-800">
+                        <summary className="cursor-pointer select-none">Show reasoning</summary>
+                        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap">
+                          {thinkingText}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
                 ) : (
-                  <p className="font-mono text-xs text-slate-500 dark:text-slate-400">
-                    Generating response from local Gemma...
+                  <p className="font-mono text-xs text-amber-600 dark:text-amber-400">
+                    No response was saved for this message (the request was interrupted). Send it again.
                   </p>
                 )}
               </article>

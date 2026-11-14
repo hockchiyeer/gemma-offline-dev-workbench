@@ -258,6 +258,9 @@ export function createApp(options: CreateAppOptions = {}) {
     const targetUrl = new URL(endpointPath, targetBase.origin).toString();
     const controller = new AbortController();
 
+    req.setTimeout?.(0);
+    res.setTimeout?.(0);
+
     // Listen on `res` (not `req`) so closing the POST body stream does not abort upstream streaming.
     res.on('close', () => {
       if (!res.writableEnded) {

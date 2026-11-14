@@ -312,14 +312,34 @@ export interface StreamGemmaOptions {
   transportHint?: 'direct' | 'proxy' | 'none';
   signal: AbortSignal;
   onToken: (partialText: string) => void;
+  /** Receives the model's reasoning trace (Ollama message.thinking / OpenAI reasoning) as it streams. */
+  onThinking?: (partialThinking: string) => void;
+  /** Called once when the first byte of any kind arrives (model finished loading). */
+  onFirstByte?: () => void;
+  /** Override timeouts (primarily for tests). */
+  firstByteTimeoutMs?: number;
+  idleTimeoutMs?: number;
+}
+
+/** Gemma 4 spends tokens on reasoning before answering; give it headroom so the answer is not starved. */
+export const THINKING_TOKEN_HEADROOM = 4096;
+const FIRST_BYTE_TIMEOUT_MS = 5 * 60_000; // cold model load can be slow on CPU / low RAM
+const IDLE_TIMEOUT_MS = 90_000;
+
+function isAbortError(err: unknown): boolean {
+  return Boolean(err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError');
 }
 
 export async function streamLocalGemmaChat({
   config,
   messages,
   transportHint,
-  signal,
+  signal: externalSignal,
   onToken,
+  onThinking,
+  onFirstByte,
+  firstByteTimeoutMs = FIRST_BYTE_TIMEOUT_MS,
+  idleTimeoutMs = IDLE_TIMEOUT_MS,
 }: StreamGemmaOptions): Promise<string> {
   const baseUrl = normalizeBaseUrl(config.baseUrl);
   if (!isLoopbackBaseUrl(baseUrl)) {
@@ -327,6 +347,7 @@ export async function streamLocalGemmaChat({
   }
 
   const numCtx = config.contextTokens ?? 8192;
+  const maxTokens = (config.maxTokens ?? 2048) + THINKING_TOKEN_HEADROOM;
   const payload =
     config.kind === 'ollama'
       ? {
@@ -335,7 +356,7 @@ export async function streamLocalGemmaChat({
           stream: true,
           options: {
             temperature: config.temperature,
-            num_predict: config.maxTokens,
+            num_predict: maxTokens,
             num_ctx: numCtx,
           },
         }
@@ -344,117 +365,187 @@ export async function streamLocalGemmaChat({
           messages,
           stream: true,
           temperature: config.temperature,
-          max_tokens: config.maxTokens,
+          max_tokens: maxTokens,
         };
 
-  let response: Response | null = null;
+  // Watchdog: abort (with a readable error) if the runtime goes silent instead of hanging forever.
+  const controller = new AbortController();
+  const signal = controller.signal;
+  let stalled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const armWatchdog = (ms: number) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      stalled = true;
+      controller.abort();
+    }, ms);
+  };
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal.aborted) {
+    controller.abort();
+  } else {
+    externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    armWatchdog(firstByteTimeoutMs);
+  }
 
-  if (transportHint !== 'proxy') {
-    try {
-      const directPath = config.kind === 'openai' ? '/v1/chat/completions' : '/api/chat';
-      // Keep any actual HTTP response (including 4xx model errors) so real runtime errors surface.
-      response = await fetch(`${baseUrl}${directPath}`, {
+  try {
+    let response: Response | null = null;
+
+    if (transportHint !== 'proxy') {
+      try {
+        const directPath = config.kind === 'openai' ? '/v1/chat/completions' : '/api/chat';
+        // Keep any actual HTTP response (including 4xx model errors) so real runtime errors surface.
+        response = await fetch(`${baseUrl}${directPath}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal,
+        });
+      } catch (err) {
+        if (isAbortError(err)) {
+          throw err;
+        }
+        response = null;
+      }
+    }
+
+    if (!response) {
+      response = await fetch('/api/local-ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          baseUrl,
+          kind: config.kind,
+          payload,
+        }),
         signal,
       });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        throw err;
-      }
-      response = null;
     }
-  }
 
-  if (!response) {
-    response = await fetch('/api/local-ai/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        baseUrl,
-        kind: config.kind,
-        payload,
-      }),
-      signal,
-    });
-  }
-
-  if (!response.ok || !response.body) {
-    let errDetail = `Local Gemma runtime error (HTTP ${response.status})`;
-    try {
-      const errJson = await response.json();
-      if (errJson?.error) errDetail = typeof errJson.error === 'string' ? errJson.error : errJson.error.message || errDetail;
-    } catch {
-      // ignore
-    }
-    throw new Error(errDetail);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let accumulated = '';
-
-  const processLine = (rawLine: string) => {
-    const line = rawLine.trim();
-    if (!line) return;
-
-    if (config.kind === 'ollama') {
+    if (!response.ok || !response.body) {
+      let errDetail = `Local Gemma runtime error (HTTP ${response.status})`;
       try {
-        const parsed = JSON.parse(line) as { message?: { content?: string }; error?: string };
-        if (parsed.error) throw new Error(parsed.error);
-        if (parsed.message?.content) {
-          accumulated += parsed.message.content;
-          onToken(accumulated);
+        const errJson = await response.json();
+        if (errJson?.error) errDetail = typeof errJson.error === 'string' ? errJson.error : errJson.error.message || errDetail;
+      } catch {
+        // ignore
+      }
+      throw new Error(errDetail);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let accumulated = '';
+    let thinking = '';
+    let doneReason = '';
+    let gotFirstByte = false;
+
+    const processLine = (rawLine: string) => {
+      const line = rawLine.trim();
+      if (!line) return;
+
+      if (config.kind === 'ollama') {
+        try {
+          const parsed = JSON.parse(line) as {
+            message?: { content?: string; thinking?: string };
+            error?: string;
+            done_reason?: string;
+          };
+          if (parsed.error) throw new Error(parsed.error);
+          if (parsed.done_reason) doneReason = parsed.done_reason;
+          if (parsed.message?.thinking) {
+            thinking += parsed.message.thinking;
+            onThinking?.(thinking);
+          }
+          if (parsed.message?.content) {
+            accumulated += parsed.message.content;
+            onToken(accumulated);
+          }
+        } catch (err) {
+          if (err instanceof Error && line.includes('"error"')) {
+            throw err;
+          }
         }
-      } catch (err) {
-        if (err instanceof Error && line.includes('"error"')) {
-          throw err;
+      } else {
+        if (!line.startsWith('data:')) return;
+        const dataStr = line.slice(5).trim();
+        if (dataStr === '[DONE]') return;
+        try {
+          const parsed = JSON.parse(dataStr) as {
+            choices?: Array<{
+              delta?: { content?: string; reasoning?: string; reasoning_content?: string };
+              finish_reason?: string | null;
+            }>;
+            error?: { message?: string };
+          };
+          if (parsed.error?.message) {
+            throw new Error(parsed.error.message);
+          }
+          const reasoning =
+            parsed.choices?.[0]?.delta?.reasoning_content ?? parsed.choices?.[0]?.delta?.reasoning;
+          if (reasoning) {
+            thinking += reasoning;
+            onThinking?.(thinking);
+          }
+          if (parsed.choices?.[0]?.finish_reason) doneReason = parsed.choices[0].finish_reason;
+          const chunk = parsed.choices?.[0]?.delta?.content;
+          if (chunk) {
+            accumulated += chunk;
+            onToken(accumulated);
+          }
+        } catch (err) {
+          if (err instanceof Error && line.includes('"error"')) {
+            throw err;
+          }
         }
       }
-    } else {
-      if (!line.startsWith('data:')) return;
-      const dataStr = line.slice(5).trim();
-      if (dataStr === '[DONE]') return;
-      try {
-        const parsed = JSON.parse(dataStr) as {
-          choices?: Array<{ delta?: { content?: string } }>;
-          error?: { message?: string };
-        };
-        if (parsed.error?.message) {
-          throw new Error(parsed.error.message);
-        }
-        const chunk = parsed.choices?.[0]?.delta?.content;
-        if (chunk) {
-          accumulated += chunk;
-          onToken(accumulated);
-        }
-      } catch (err) {
-        if (err instanceof Error && line.includes('"error"')) {
-          throw err;
-        }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!gotFirstByte) {
+        gotFirstByte = true;
+        onFirstByte?.();
+      }
+      armWatchdog(idleTimeoutMs);
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        processLine(line);
       }
     }
-  };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      processLine(line);
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      processLine(buffer);
     }
-  }
 
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    processLine(buffer);
-  }
+    if (!accumulated.trim() && thinking.trim()) {
+      if (doneReason === 'length' || !doneReason) {
+        throw new Error(
+          'The model used its entire token budget on reasoning and produced no answer. Increase "Max tokens" in Model Setup and retry.'
+        );
+      }
+      throw new Error(
+        'The model finished reasoning without producing a final answer. Try rephrasing or increasing "Max tokens" in Model Setup.'
+      );
+    }
 
-  return accumulated;
+    return accumulated;
+  } catch (err) {
+    if (stalled) {
+      throw new Error(
+        'The local model stopped responding (no data received). Check that Ollama is running and the model fits in RAM, then retry.'
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    externalSignal.removeEventListener('abort', onExternalAbort);
+  }
 }
 
 export interface BuiltGemmaPayload {
@@ -510,10 +601,11 @@ export function buildGemmaMessages(
   let remainingBudget = Math.max(2000, maxChars - systemMessage.content.length);
   const selectedHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
-  // Keep the most recent turns within the character budget
+  // Keep the most recent turns within the character budget; skip stale empty assistant placeholders.
   const recentSlice = history.slice(-16);
   for (let i = recentSlice.length - 1; i >= 0; i--) {
     const msg = recentSlice[i];
+    if (msg.role === 'assistant' && !msg.content.trim()) continue;
     if (msg.content.length <= remainingBudget || selectedHistory.length === 0) {
       const content =
         msg.content.length <= remainingBudget
