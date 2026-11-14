@@ -5,6 +5,8 @@ export interface ProbeResult {
   transport: 'direct' | 'proxy' | 'none';
   models: GemmaModelInfo[];
   recommendedModel: GemmaModelInfo | null;
+  /** Ollama build version (e.g. "0.12.3") when the runtime reports one. */
+  version?: string;
   error?: string;
 }
 
@@ -211,6 +213,17 @@ async function parseModelsResponse(
     .sort((a, b) => b.rankScore - a.rankScore);
 }
 
+async function fetchOllamaVersionDirect(baseUrl: string): Promise<string | undefined> {
+  try {
+    const resp = await fetch(`${baseUrl}/api/version`, { signal: AbortSignal.timeout(1500) });
+    if (!resp.ok) return undefined;
+    const body = (await resp.json()) as { version?: unknown };
+    return typeof body.version === 'string' ? body.version.slice(0, 40) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function probeLocalGemmaRuntime(config: LocalRuntimeConfig): Promise<ProbeResult> {
   const baseUrl = normalizeBaseUrl(config.baseUrl);
   if (!isLoopbackBaseUrl(baseUrl)) {
@@ -234,11 +247,14 @@ export async function probeLocalGemmaRuntime(config: LocalRuntimeConfig): Promis
       const json = await resp.json();
       const models = await parseModelsResponse(config.kind, json);
       const recommendedModel = pickRecommendedModel(models);
+      const version =
+        config.kind === 'ollama' ? await fetchOllamaVersionDirect(baseUrl) : undefined;
       return {
         connected: true,
         transport: 'direct',
         models,
         recommendedModel,
+        version,
       };
     }
   } catch {
@@ -258,7 +274,11 @@ export async function probeLocalGemmaRuntime(config: LocalRuntimeConfig): Promis
       signal: proxyController.signal,
     });
     if (resp.ok) {
-      const wrapper = (await resp.json()) as { ok?: boolean; data?: unknown };
+      const wrapper = (await resp.json()) as {
+        ok?: boolean;
+        data?: unknown;
+        version?: unknown;
+      };
       if (wrapper.ok && wrapper.data) {
         const models = await parseModelsResponse(config.kind, wrapper.data);
         const recommendedModel = pickRecommendedModel(models);
@@ -267,6 +287,7 @@ export async function probeLocalGemmaRuntime(config: LocalRuntimeConfig): Promis
           transport: 'proxy',
           models,
           recommendedModel,
+          version: typeof wrapper.version === 'string' ? wrapper.version : undefined,
         };
       }
     }

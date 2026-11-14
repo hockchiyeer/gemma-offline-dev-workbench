@@ -40,30 +40,32 @@ export function parseLoopbackUrl(rawUrl: string): URL | null {
 
 export const isLoopbackUrl = parseLoopbackUrl;
 
-function createSecurityHeaders(production: boolean) {
+function createSecurityHeaders(production: boolean, managedContainer: boolean) {
   return (_req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('X-Frame-Options', 'DENY');
+    if (!managedContainer) {
+      res.setHeader('X-Frame-Options', 'DENY');
+    }
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
     if (production) {
       // Note: Do not include http://[::1]:* because Chromium rejects bracketed IPv6 wildcards in CSP.
-      res.setHeader(
-        'Content-Security-Policy',
-        [
-          "default-src 'self'",
-          "script-src 'self'",
-          "style-src 'self' 'unsafe-inline'",
-          "font-src 'self' data:",
-          "img-src 'self' data: blob:",
-          "connect-src 'self' http://localhost:* http://127.0.0.1:*",
-          "form-action 'self'",
-          "object-src 'none'",
-          "base-uri 'self'",
-          "frame-ancestors 'none'",
-        ].join('; ')
-      );
+      const directives = [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
+        "img-src 'self' data: blob:",
+        "connect-src 'self' http://localhost:* http://127.0.0.1:*",
+        "form-action 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+      ];
+      if (!managedContainer) {
+        directives.push("frame-ancestors 'none'");
+      }
+      res.setHeader('Content-Security-Policy', directives.join('; '));
     }
     next();
   };
@@ -119,6 +121,8 @@ export interface CreateAppOptions {
   allowSetup?: boolean;
   /** Override production header mode (defaults to NODE_ENV=production or --production). */
   isProduction?: boolean;
+  /** Override managed container detection (defaults to K_SERVICE / APP_URL). */
+  managedContainer?: boolean;
 }
 
 export function createApp(options: CreateAppOptions = {}) {
@@ -126,6 +130,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const setupManager = options.setupManager ?? createSetupManager();
   const allowSetup = options.allowSetup ?? LOOPBACK_BIND_HOSTS.has(bindHost);
   const productionHeaders = options.isProduction ?? isProduction;
+  const managedContainer = options.managedContainer ?? isManagedContainer;
   const app = express();
   app.disable('x-powered-by');
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -135,7 +140,7 @@ export function createApp(options: CreateAppOptions = {}) {
     }
     next();
   });
-  app.use(createSecurityHeaders(productionHeaders));
+  app.use(createSecurityHeaders(productionHeaders, managedContainer));
   app.use(express.json({ limit: '4mb' }));
   app.use('/api', sameOriginOnly);
 
@@ -205,7 +210,21 @@ export function createApp(options: CreateAppOptions = {}) {
         return;
       }
       const data = await upstream.json();
-      res.json({ ok: true, data });
+      // Ollama only: also report its version so the UI can show which runtime build is up.
+      let version: string | undefined;
+      if (kind !== 'openai') {
+        try {
+          const v = await fetch(new URL('/api/version', targetBase.origin).toString(), {
+            signal: AbortSignal.timeout(1500),
+            redirect: 'error',
+          });
+          const parsed = (await v.json()) as { version?: unknown };
+          if (typeof parsed.version === 'string') version = parsed.version.slice(0, 40);
+        } catch {
+          // version is optional
+        }
+      }
+      res.json({ ok: true, data, version });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to reach local runtime';
       res.status(503).json({ ok: false, error: message });
@@ -334,13 +353,26 @@ async function startServer() {
     });
   }
 
-  if (isProduction) {
+  // Tell the operator, in this terminal, whether the local LLM is actually up (the web app being up says nothing about it).
+  {
     const { findOllamaBinary, listInstalledModels } = await import('./server/ollamaSetup.ts');
     const models = await listInstalledModels();
     if (models === null && !findOllamaBinary()) {
-      console.log('Local AI: Ollama not found. Open the app → Runtime settings → "Auto-setup", or run: npm run setup:gemma');
-    } else if (models !== null && !models.some((m) => m.toLowerCase().includes('gemma'))) {
-      console.log('Local AI: Ollama is running but no Gemma model is installed. Run: npm run setup:gemma');
+      console.log(
+        'Local LLM: DOWN - Ollama is not installed. Run: npm run setup:gemma (or use Runtime settings -> Auto-setup in the app).'
+      );
+    } else if (models === null) {
+      console.log(
+        'Local LLM: DOWN - Ollama is installed but not running. Start the Ollama app, or run: npm run setup:gemma'
+      );
+    } else if (!models.some((m) => m.toLowerCase().includes('gemma'))) {
+      console.log('Local LLM: UP, but no Gemma model installed. Run: npm run setup:gemma');
+    } else {
+      console.log(
+        `Local LLM: UP - Ollama is running with: ${models
+          .filter((m) => m.toLowerCase().includes('gemma'))
+          .join(', ')}. Nothing to download or start.`
+      );
     }
   }
 

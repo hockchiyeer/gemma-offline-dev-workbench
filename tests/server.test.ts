@@ -33,6 +33,11 @@ test('Local AI proxy probes, streams end-to-end, blocks SSRF, and enforces same-
       res.end(JSON.stringify({ models: [{ name: 'gemma4:e4b' }] }));
       return;
     }
+    if (req.url === '/api/version') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ version: '9.9.9-test' }));
+      return;
+    }
     if (req.url === '/api/chat' && req.method === 'POST') {
       res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
       res.write(`${JSON.stringify({ message: { content: 'Hello ' } })}\n`);
@@ -63,8 +68,10 @@ test('Local AI proxy probes, streams end-to-end, blocks SSRF, and enforces same-
     const probeJson = (await probeResp.json()) as {
       ok: boolean;
       data: { models: Array<{ name: string }> };
+      version?: string;
     };
     assert.equal(probeJson.ok, true);
+    assert.equal(probeJson.version, '9.9.9-test', 'probe reports the Ollama version for the status bar');
     assert.equal(probeJson.data.models[0].name, 'gemma4:e4b');
 
     // 2. Streaming chat endpoint (verifies req.close does not prematurely abort)
@@ -157,16 +164,29 @@ test('Host header allowlist blocks DNS-rebinding names when bound to loopback', 
   }
 });
 
-test('Security headers enforce X-Frame-Options DENY and production CSP form-action/frame-ancestors', async () => {
-  const prodServer = http.createServer(createApp({ bindHost: '127.0.0.1', isProduction: true }));
-  const handle = await listenServer(prodServer);
+test('Security headers enforce X-Frame-Options DENY and production CSP form-action/frame-ancestors locally', async () => {
+  const localProd = http.createServer(
+    createApp({ bindHost: '127.0.0.1', isProduction: true, managedContainer: false })
+  );
+  const localHandle = await listenServer(localProd);
+  const containerProd = http.createServer(
+    createApp({ bindHost: '0.0.0.0', isProduction: true, managedContainer: true })
+  );
+  const containerHandle = await listenServer(containerProd);
   try {
-    const resp = await fetch(`http://127.0.0.1:${handle.port}/api/setup/status`);
-    assert.equal(resp.headers.get('x-frame-options'), 'DENY');
-    const csp = resp.headers.get('content-security-policy') || '';
-    assert.match(csp, /\bform-action 'self'/);
-    assert.match(csp, /\bframe-ancestors 'none'/);
+    const localResp = await fetch(`http://127.0.0.1:${localHandle.port}/api/setup/status`);
+    assert.equal(localResp.headers.get('x-frame-options'), 'DENY');
+    const localCsp = localResp.headers.get('content-security-policy') || '';
+    assert.match(localCsp, /\bform-action 'self'/);
+    assert.match(localCsp, /\bframe-ancestors 'none'/);
+
+    const containerResp = await fetch(`http://127.0.0.1:${containerHandle.port}/api/setup/status`);
+    assert.equal(containerResp.headers.get('x-frame-options'), null);
+    const containerCsp = containerResp.headers.get('content-security-policy') || '';
+    assert.match(containerCsp, /\bform-action 'self'/);
+    assert.doesNotMatch(containerCsp, /\bframe-ancestors\b/);
   } finally {
-    await handle.close();
+    await localHandle.close();
+    await containerHandle.close();
   }
 });

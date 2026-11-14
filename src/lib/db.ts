@@ -326,14 +326,13 @@ GemmaVault connects directly to locally installed **Google Gemma** open-weight m
 
 ## Option 1: Ollama (Recommended)
 
-Install Ollama once, pull your preferred Gemma model, and run it completely offline:
+Install Ollama and a Gemma model once, then run completely offline. This command is safe to re-run; it skips anything already installed:
 
 \`\`\`bash
-ollama pull gemma4:e4b
-OLLAMA_ORIGINS="http://localhost:3000" ollama serve
+npm run setup:gemma
 \`\`\`
 
-> Tip: When running GemmaVault via its local Node server (\`npm run dev\` or \`npm start\`), the built-in loopback proxy automatically handles local CORS so \`ollama serve\` works out of the box.
+> Tip: the status bar under the header shows whether the local LLM is up. Do not run \`ollama serve\` if Ollama is already running; the status bar and the terminal both tell you.
 
 ## Option 2: LM Studio or llama.cpp Server
 

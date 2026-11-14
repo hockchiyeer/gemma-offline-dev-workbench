@@ -35,6 +35,10 @@ export interface SetupStatus {
   job: SetupJob;
 }
 
+/** Fired so the status bar re-checks immediately instead of waiting for its next poll. */
+export const RUNTIME_CHANGED_EVENT = 'gemmavault:runtime-changed';
+const notifyRuntimeChanged = () => window.dispatchEvent(new Event(RUNTIME_CHANGED_EVENT));
+
 const HEADERS = { 'Content-Type': 'application/json', 'X-GemmaVault-Setup': '1' };
 
 /** Returns null when the local GemmaVault server (and so auto-setup) is unavailable, e.g. static PWA or non-loopback server. */
@@ -58,10 +62,12 @@ export async function startGemmaSetup(model?: string): Promise<void> {
     const body = (await resp.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error || `Setup could not start (HTTP ${resp.status}).`);
   }
+  notifyRuntimeChanged();
 }
 
 export async function cancelGemmaSetup(): Promise<void> {
   await fetch('/api/setup/cancel', { method: 'POST', headers: HEADERS, body: '{}' }).catch(
     () => undefined
   );
+  notifyRuntimeChanged();
 }

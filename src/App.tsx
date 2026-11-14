@@ -16,10 +16,12 @@ import { DocsView } from './components/DocsView';
 import { GemmaAssistantPane } from './components/GemmaAssistantPane';
 import { LocalGemmaSetupModal } from './components/LocalGemmaSetupModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { RuntimeStatusBar } from './components/RuntimeStatusBar';
 import { SnippetsView } from './components/SnippetsView';
 import { VaultDatabaseView } from './components/VaultDatabaseView';
 import { VaultLockScreen } from './components/VaultLockScreen';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
+import { useRuntimeStatus } from './hooks/useRuntimeStatus';
 import {
   changeVaultPassphrase,
   DEFAULT_RUNTIME_CONFIG,
@@ -149,9 +151,9 @@ function AppShell() {
   }, []);
 
   const runRuntimeProbe = useCallback(
-    async (overrideConfig?: LocalRuntimeConfig) => {
+    async (overrideConfig?: LocalRuntimeConfig, silent = false) => {
       const cfg = overrideConfig || workspace?.runtimeConfig || DEFAULT_RUNTIME_CONFIG;
-      setProbing(true);
+      if (!silent) setProbing(true);
       try {
         const result = await probeLocalGemmaRuntime(cfg);
         setProbe(result);
@@ -166,11 +168,22 @@ function AppShell() {
           }
         }
       } finally {
-        setProbing(false);
+        if (!silent) setProbing(false);
       }
     },
     [workspace]
   );
+
+  // Always-visible local-LLM status (separate from "the web page loaded"), refreshed in the background.
+  const refreshProbeSilently = useCallback(
+    () => runRuntimeProbe(undefined, true),
+    [runRuntimeProbe]
+  );
+  const runtimeStatus = useRuntimeStatus({
+    config: workspace?.runtimeConfig,
+    probe,
+    refreshProbe: refreshProbeSilently,
+  });
 
   useEffect(() => {
     let mounted = true;
@@ -701,6 +714,14 @@ function AppShell() {
         </div>
       </header>
 
+      <RuntimeStatusBar
+        status={runtimeStatus.status}
+        refreshing={runtimeStatus.refreshing}
+        lastCheckedAt={runtimeStatus.lastCheckedAt}
+        onRecheck={() => void runtimeStatus.recheck()}
+        onOpenSettings={() => setRuntimeModalOpen(true)}
+      />
+
       {/* Main Responsive Workspace */}
       <div className="flex min-h-0 flex-1 overflow-hidden pb-14 md:pb-0">
         {/* Desktop Project & Quick-Jump Rail */}
@@ -798,7 +819,7 @@ function AppShell() {
                 aria-label="Filter by workspace project"
                 value={activeProjectId}
                 onChange={(e) => setActiveProjectId(e.target.value)}
-                className="min-h-[40px] lg:min-h-[36px] max-w-[220px] rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-medium text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
+                className="min-h-[40px] lg:min-h-[36px] pointer-coarse:min-h-[40px] max-w-[220px] rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-medium text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
               >
                 <option value="all">All Workspaces</option>
                 {workspace.projects.map((p) => (

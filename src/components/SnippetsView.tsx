@@ -202,7 +202,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
               aria-label="Filter by language"
               value={langFilter}
               onChange={(e) => setLangFilter(e.target.value as 'all' | SupportedLanguage)}
-              className="min-h-[40px] lg:min-h-[38px] flex-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-700 outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300"
+              className="min-h-[40px] lg:min-h-[38px] pointer-coarse:min-h-[40px] flex-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-700 outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300"
             >
               <option value="all">All Languages</option>
               {SUPPORTED_LANGUAGES.map((l) => (
@@ -215,7 +215,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
             <button
               type="button"
               onClick={() => setFavoritesOnly((v) => !v)}
-              className={`inline-flex min-h-[40px] lg:min-h-[38px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+              className={`inline-flex min-h-[40px] lg:min-h-[38px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-lg border px-3 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                 favoritesOnly
                   ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
                   : 'border-slate-200 bg-slate-50 text-slate-600 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400 dark:hover:text-slate-200'
@@ -320,7 +320,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setViewMode('edit')}
-                    className={`inline-flex min-h-[40px] lg:min-h-[34px] items-center gap-1.5 rounded-md px-2.5 text-xs font-medium ${
+                    className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-md px-2.5 text-xs font-medium ${
                       viewMode === 'edit'
                         ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
                         : 'text-slate-600 dark:text-slate-400'
@@ -332,7 +332,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setViewMode('preview')}
-                    className={`inline-flex min-h-[40px] lg:min-h-[34px] items-center gap-1.5 rounded-md px-2.5 text-xs font-medium ${
+                    className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-md px-2.5 text-xs font-medium ${
                       viewMode === 'preview'
                         ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
                         : 'text-slate-600 dark:text-slate-400'
@@ -397,7 +397,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                   onChange={(e) =>
                     handleUpdate({ language: e.target.value as SupportedLanguage })
                   }
-                  className="min-h-[40px] lg:min-h-[36px] rounded-lg border border-slate-200 bg-white px-2.5 font-mono text-xs text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+                  className="min-h-[40px] lg:min-h-[36px] pointer-coarse:min-h-[40px] rounded-lg border border-slate-200 bg-white px-2.5 font-mono text-xs text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
                 >
                   {SUPPORTED_LANGUAGES.map((l) => (
                     <option key={l.id} value={l.id}>
@@ -410,7 +410,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                   aria-label="Snippet project"
                   value={activeSnippet.projectId}
                   onChange={(e) => handleUpdate({ projectId: e.target.value })}
-                  className="min-h-[40px] lg:min-h-[36px] rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+                  className="min-h-[40px] lg:min-h-[36px] pointer-coarse:min-h-[40px] rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
                 >
                   {projects.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -438,7 +438,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                     key={action.label}
                     type="button"
                     onClick={() => onSendToGemma(activeSnippet, action.prompt)}
-                    className="inline-flex min-h-[40px] lg:min-h-[34px] items-center gap-1 rounded-lg border border-teal-600/30 bg-teal-500/10 px-2.5 text-xs font-medium text-teal-700 transition-colors hover:bg-teal-500/20 whitespace-nowrap shrink-0 dark:text-teal-300"
+                    className="inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1 rounded-lg border border-teal-600/30 bg-teal-500/10 px-2.5 text-xs font-medium text-teal-700 transition-colors hover:bg-teal-500/20 whitespace-nowrap shrink-0 dark:text-teal-300"
                   >
                     <Sparkles className="h-3 w-3" />
                     {action.label}
@@ -499,11 +499,11 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                       value={tagInput}
                       onChange={(e) => setTagInput(e.target.value)}
                       placeholder="Add tag (e.g. auth)"
-                      className="min-h-[40px] lg:min-h-[38px] flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs text-slate-900 outline-none focus:border-teal-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
+                      className="min-h-[40px] lg:min-h-[38px] pointer-coarse:min-h-[40px] flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs text-slate-900 outline-none focus:border-teal-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
                     />
                     <button
                       type="submit"
-                      className="min-h-[40px] lg:min-h-[38px] rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                      className="min-h-[40px] lg:min-h-[38px] pointer-coarse:min-h-[40px] rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                     >
                       Add
                     </button>

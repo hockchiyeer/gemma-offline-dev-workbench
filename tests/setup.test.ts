@@ -279,6 +279,10 @@ test('ensureOllamaOnPath updates Windows User PATH and shell profile idempotentl
 
 test('isExpectedOllamaSignerSubject requires CN or O to identify Ollama rather than arbitrary substrings', () => {
   assert.equal(
+    isExpectedOllamaSignerSubject('CN=Ollama Inc., O=Ollama Inc., L=Toronto, S=Ontario, C=CA'),
+    true
+  );
+  assert.equal(
     isExpectedOllamaSignerSubject('CN=Ollama, O=Ollama, L=Palo Alto, S=California, C=US'),
     true
   );
