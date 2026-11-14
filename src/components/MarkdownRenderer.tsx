@@ -277,7 +277,12 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
       continue;
     }
 
-    const paraLines: string[] = [];
+    // Always consume the current line. Lines that none of the block rules above accepted (e.g. a
+    // table header whose separator row has not streamed in yet, "#!/bin/bash", "##### x") would
+    // otherwise match none of the paragraph continuation rules below, leaving `i` unchanged and
+    // spinning forever while pushing empty <p> elements until the tab runs out of memory.
+    const paraLines: string[] = [line];
+    i++;
     while (
       i < lines.length &&
       lines[i].trim() !== '' &&
