@@ -11,6 +11,7 @@ import {
 } from '../src/lib/crypto.ts';
 import { parseBackupFile, sanitizeRuntimeConfig } from '../src/lib/db.ts';
 import {
+  THINKING_TOKEN_HEADROOM,
   buildGemmaMessages,
   classifyAndRankModel,
   isLoopbackBaseUrl,
@@ -117,6 +118,26 @@ test('Context budget builder supports token-window options and trims oversized a
   assert.equal(built.truncated, true);
   assert.equal(built.messages[0].role, 'system');
   assert.equal(built.messages[built.messages.length - 1].content, 'Fix line 10');
+
+  // Reserving reply + thinking headroom on an 8192 window keeps system prompt + latest user turn
+  // while skipping stale empty assistant placeholders.
+  const withThinkingReserve = buildGemmaMessages(
+    'System instruction.',
+    [
+      { id: '1', role: 'user', content: 'old question '.repeat(600), createdAt: 1 },
+      { id: '2', role: 'assistant', content: '', createdAt: 2 },
+      { id: '3', role: 'user', content: 'Latest prompt', createdAt: 3 },
+    ],
+    [],
+    { contextTokens: 8192, reserveForReply: 2048 + THINKING_TOKEN_HEADROOM }
+  );
+  assert.equal(withThinkingReserve.truncated, true);
+  assert.equal(withThinkingReserve.messages[0].content, 'System instruction.');
+  assert.equal(
+    withThinkingReserve.messages.some((m) => m.role === 'assistant' && !m.content),
+    false
+  );
+  assert.equal(withThinkingReserve.messages[withThinkingReserve.messages.length - 1].content, 'Latest prompt');
 });
 
 test('SaveQueue coalesces rapid writes, cancels pending writes on now(), and surfaces errors', async () => {

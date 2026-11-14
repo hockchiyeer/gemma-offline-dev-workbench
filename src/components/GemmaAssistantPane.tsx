@@ -12,7 +12,12 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { buildGemmaMessages, streamLocalGemmaChat, type ProbeResult } from '../lib/gemmaClient';
+import {
+  THINKING_TOKEN_HEADROOM,
+  buildGemmaMessages,
+  streamLocalGemmaChat,
+  type ProbeResult,
+} from '../lib/gemmaClient';
 import type {
   ChatAttachmentRef,
   ChatMessage,
@@ -100,6 +105,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   const [streamError, setStreamError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const latestDraftRef = useRef<string>('');
+  const latestThinkingRef = useRef<string>('');
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
 
   const activeSession = useMemo(
@@ -230,6 +236,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     const controller = new AbortController();
     abortRef.current = controller;
     latestDraftRef.current = '';
+    latestThinkingRef.current = '';
     setStreamingDraft({ msgId: assistantMsgId, text: '' });
     setThinkingText('');
     setModelLoaded(false);
@@ -243,7 +250,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         resolveContextBlocks(usedAttachments),
         {
           contextTokens: runtimeConfig.contextTokens,
-          reserveForReply: runtimeConfig.maxTokens,
+          reserveForReply: runtimeConfig.maxTokens + THINKING_TOKEN_HEADROOM,
         }
       );
       if (built.truncated) {
@@ -256,7 +263,10 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         transportHint: probe.transport,
         signal: controller.signal,
         onFirstByte: () => setModelLoaded(true),
-        onThinking: (t) => setThinkingText(t),
+        onThinking: (t) => {
+          latestThinkingRef.current = t;
+          setThinkingText(t);
+        },
         onToken: (partial) => {
           latestDraftRef.current = partial;
           setStreamingDraft({ msgId: assistantMsgId, text: partial });
@@ -264,6 +274,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       });
 
       const elapsed = Math.round(performance.now() - startedAt);
+      const savedThinking = latestThinkingRef.current.trim() || undefined;
       const completedSession: ChatSession = {
         ...baseSession,
         messages: baseSession.messages.map((m) =>
@@ -271,6 +282,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             ? {
                 ...m,
                 content: finalText || 'Empty response returned by local Gemma model.',
+                thinking: savedThinking,
                 durationMs: elapsed,
               }
             : m
@@ -282,12 +294,13 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       const isAbort =
         Boolean(err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError');
       const partial = latestDraftRef.current.trim();
+      const savedThinking = latestThinkingRef.current.trim() || undefined;
       if (isAbort) {
         const stoppedSession: ChatSession = {
           ...baseSession,
           messages: partial
             ? baseSession.messages.map((m) =>
-                m.id === assistantMsgId ? { ...m, content: partial } : m
+                m.id === assistantMsgId ? { ...m, content: partial, thinking: savedThinking } : m
               )
             : baseSession.messages.filter((m) => m.id !== assistantMsgId),
           updatedAt: Date.now(),
@@ -303,7 +316,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
           ...baseSession,
           messages: partial
             ? baseSession.messages.map((m) =>
-                m.id === assistantMsgId ? { ...m, content: partial } : m
+                m.id === assistantMsgId ? { ...m, content: partial, thinking: savedThinking } : m
               )
             : baseSession.messages.filter((m) => m.id !== assistantMsgId),
           updatedAt: Date.now(),
@@ -313,6 +326,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     } finally {
       abortRef.current = null;
       latestDraftRef.current = '';
+      latestThinkingRef.current = '';
       setStreamingDraft(null);
       setThinkingText('');
       setModelLoaded(false);
@@ -452,10 +466,9 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
           )}
 
           {activeSession?.messages.map((msg) => {
-            const displayContent =
-              streamingDraft && streamingDraft.msgId === msg.id
-                ? streamingDraft.text
-                : msg.content;
+            const isStreamingThis = streamingDraft && streamingDraft.msgId === msg.id;
+            const displayContent = isStreamingThis ? streamingDraft.text : msg.content;
+            const displayThinking = isStreamingThis ? thinkingText : msg.thinking || '';
 
             return (
               <article
@@ -495,11 +508,11 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                   </p>
                 ) : displayContent ? (
                   <div className="space-y-3">
-                    {streamingDraft && streamingDraft.msgId === msg.id && thinkingText && (
+                    {displayThinking && (
                       <details className="rounded-lg border border-slate-200 p-2 font-mono text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
                         <summary className="cursor-pointer select-none">Show reasoning</summary>
                         <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap">
-                          {thinkingText}
+                          {displayThinking}
                         </pre>
                       </details>
                     )}
@@ -508,7 +521,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                       onSaveSnippet={onSaveSnippetFromCode}
                     />
                   </div>
-                ) : streamingDraft && streamingDraft.msgId === msg.id ? (
+                ) : isStreamingThis ? (
                   <div className="space-y-2 font-mono text-xs text-slate-500 dark:text-slate-400">
                     <p>
                       {!modelLoaded
