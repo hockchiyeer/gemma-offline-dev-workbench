@@ -10,6 +10,7 @@ import {
   ensureOllamaOnPath,
   isAllowedGemmaTag,
   isDirInPath,
+  isExpectedOllamaSignerSubject,
   pullModel,
   recommendModel,
   toPosixPath,
@@ -274,4 +275,26 @@ test('ensureOllamaOnPath updates Windows User PATH and shell profile idempotentl
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('isExpectedOllamaSignerSubject requires CN or O to identify Ollama rather than arbitrary substrings', () => {
+  assert.equal(
+    isExpectedOllamaSignerSubject('CN=Ollama, O=Ollama, L=Palo Alto, S=California, C=US'),
+    true
+  );
+  assert.equal(
+    isExpectedOllamaSignerSubject('CN=Ollama Inc, O=Ollama Inc, L=San Francisco, C=US'),
+    true
+  );
+  assert.equal(
+    isExpectedOllamaSignerSubject('CN="Ollama, Inc.", O="Ollama, Inc.", C=US'),
+    true
+  );
+  assert.equal(
+    isExpectedOllamaSignerSubject('CN=Fake Ollama Tools LLC, O=Evil Corp, C=US'),
+    false
+  );
+  assert.equal(isExpectedOllamaSignerSubject('CN=Attacker, OU=ollama-mirror'), false);
+  assert.equal(isExpectedOllamaSignerSubject(''), false);
+  assert.equal(isExpectedOllamaSignerSubject(null), false);
 });

@@ -349,7 +349,7 @@ export const LocalGemmaSetupModal: React.FC<LocalGemmaSetupModalProps> = ({
                 {setup.system.ollamaRunning &&
                 setup.system.installedModels.some((m) => m.toLowerCase().includes('gemma'))
                   ? 'Ollama and a Gemma model are installed. Everything runs offline.'
-                  : `Installs Ollama (if missing) and downloads ${setup.system.recommendedModel} — recommended for ${setup.system.totalMemGiB} GB RAM. A one-time download; afterwards no internet is needed.`}
+                  : `Connects once to ollama.com to install Ollama (if missing) and download ${setup.system.recommendedModel} — recommended for ${setup.system.totalMemGiB} GB RAM. Afterwards, no internet connection is needed.`}
               </p>
               {setup.job.phase !== 'idle' && (
                 <div className="mt-2" aria-live="polite">

@@ -343,7 +343,14 @@ async function downloadInstaller(
   await pipeline(source, fs.createWriteStream(dest), { signal });
 }
 
-/** Windows only: require a valid Authenticode signature whose subject mentions Ollama. */
+const OLLAMA_SUBJECT_ATTR_RE = /(?:^|,\s*)(?:CN|O)="?Ollama(?:,?\s*Inc\.?)?"?(?:\s*,|$)/i;
+
+/** Requires CN= or O= in the X.509 Subject to identify Ollama directly (not arbitrary substrings). */
+export function isExpectedOllamaSignerSubject(subject: string | undefined | null): boolean {
+  return typeof subject === 'string' && OLLAMA_SUBJECT_ATTR_RE.test(subject.trim());
+}
+
+/** Windows only: require a valid Authenticode signature issued to Ollama / Ollama Inc. */
 export function verifyInstallerSignature(file: string): { ok: boolean; detail: string } {
   const script =
     '$s = Get-AuthenticodeSignature -LiteralPath $env:GV_FILE; ' +
@@ -356,7 +363,7 @@ export function verifyInstallerSignature(file: string): { ok: boolean; detail: s
   });
   try {
     const parsed = JSON.parse((r.stdout || '').trim()) as { Status: string; Subject: string };
-    const ok = parsed.Status === 'Valid' && /ollama/i.test(parsed.Subject || '');
+    const ok = parsed.Status === 'Valid' && isExpectedOllamaSignerSubject(parsed.Subject);
     return { ok, detail: `signature ${parsed.Status}; signer ${parsed.Subject || 'unknown'}` };
   } catch {
     return { ok: false, detail: 'could not read installer signature' };

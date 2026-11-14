@@ -186,7 +186,7 @@ export const DocsView: React.FC<DocsViewProps> = ({
                 key={cat.id}
                 type="button"
                 onClick={() => setCategoryFilter(cat.id)}
-                className={`min-h-[32px] rounded-md px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                className={`min-h-[40px] lg:min-h-[32px] rounded-md px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                   categoryFilter === cat.id
                     ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-800 dark:text-white'
                     : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
@@ -288,7 +288,7 @@ export const DocsView: React.FC<DocsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setMode('edit')}
-                    className={`inline-flex min-h-[34px] items-center gap-1 rounded-md px-2.5 text-xs font-medium ${
+                    className={`inline-flex min-h-[40px] lg:min-h-[34px] items-center gap-1 rounded-md px-2.5 text-xs font-medium ${
                       mode === 'edit'
                         ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
                         : 'text-slate-600 dark:text-slate-400'
@@ -300,7 +300,7 @@ export const DocsView: React.FC<DocsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setMode('split')}
-                    className={`hidden min-h-[34px] items-center gap-1 rounded-md px-2.5 text-xs font-medium md:inline-flex ${
+                    className={`hidden min-h-[40px] lg:min-h-[34px] items-center gap-1 rounded-md px-2.5 text-xs font-medium md:inline-flex ${
                       mode === 'split'
                         ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
                         : 'text-slate-600 dark:text-slate-400'
@@ -312,7 +312,7 @@ export const DocsView: React.FC<DocsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setMode('preview')}
-                    className={`inline-flex min-h-[34px] items-center gap-1 rounded-md px-2.5 text-xs font-medium ${
+                    className={`inline-flex min-h-[40px] lg:min-h-[34px] items-center gap-1 rounded-md px-2.5 text-xs font-medium ${
                       mode === 'preview'
                         ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
                         : 'text-slate-600 dark:text-slate-400'
@@ -362,7 +362,7 @@ export const DocsView: React.FC<DocsViewProps> = ({
                   aria-label="Document category"
                   value={activeDoc.category}
                   onChange={(e) => handleUpdate({ category: e.target.value as DocCategory })}
-                  className="min-h-[36px] rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+                  className="min-h-[40px] lg:min-h-[36px] rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
                 >
                   <option value="architecture">Architecture</option>
                   <option value="api">API</option>
@@ -374,7 +374,7 @@ export const DocsView: React.FC<DocsViewProps> = ({
                   aria-label="Document project"
                   value={activeDoc.projectId}
                   onChange={(e) => handleUpdate({ projectId: e.target.value })}
-                  className="min-h-[36px] rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+                  className="min-h-[40px] lg:min-h-[36px] rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
                 >
                   {projects.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -396,7 +396,7 @@ export const DocsView: React.FC<DocsViewProps> = ({
                     'Review this project documentation for technical gaps, clarify unclear steps, and suggest concrete code examples.'
                   )
                 }
-                className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-teal-600/30 bg-teal-500/10 px-3 text-xs font-medium text-teal-700 hover:bg-teal-500/20 whitespace-nowrap shrink-0 dark:text-teal-300"
+                className="inline-flex min-h-[40px] lg:min-h-[34px] items-center gap-1.5 rounded-lg border border-teal-600/30 bg-teal-500/10 px-3 text-xs font-medium text-teal-700 hover:bg-teal-500/20 whitespace-nowrap shrink-0 dark:text-teal-300"
               >
                 <Sparkles className="h-3.5 w-3.5" />
                 Review with Gemma

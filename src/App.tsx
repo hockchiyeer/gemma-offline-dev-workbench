@@ -798,7 +798,7 @@ function AppShell() {
                 aria-label="Filter by workspace project"
                 value={activeProjectId}
                 onChange={(e) => setActiveProjectId(e.target.value)}
-                className="min-h-[36px] max-w-[220px] rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-medium text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
+                className="min-h-[40px] lg:min-h-[36px] max-w-[220px] rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-medium text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
               >
                 <option value="all">All Workspaces</option>
                 {workspace.projects.map((p) => (

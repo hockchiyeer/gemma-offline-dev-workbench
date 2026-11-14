@@ -156,3 +156,17 @@ test('Host header allowlist blocks DNS-rebinding names when bound to loopback', 
     await handle.close();
   }
 });
+
+test('Security headers enforce X-Frame-Options DENY and production CSP form-action/frame-ancestors', async () => {
+  const prodServer = http.createServer(createApp({ bindHost: '127.0.0.1', isProduction: true }));
+  const handle = await listenServer(prodServer);
+  try {
+    const resp = await fetch(`http://127.0.0.1:${handle.port}/api/setup/status`);
+    assert.equal(resp.headers.get('x-frame-options'), 'DENY');
+    const csp = resp.headers.get('content-security-policy') || '';
+    assert.match(csp, /\bform-action 'self'/);
+    assert.match(csp, /\bframe-ancestors 'none'/);
+  } finally {
+    await handle.close();
+  }
+});

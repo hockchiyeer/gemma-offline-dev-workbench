@@ -40,30 +40,33 @@ export function parseLoopbackUrl(rawUrl: string): URL | null {
 
 export const isLoopbackUrl = parseLoopbackUrl;
 
-function securityHeaders(_req: Request, res: Response, next: NextFunction) {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+function createSecurityHeaders(production: boolean) {
+  return (_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
-  if (isProduction) {
-    // Note: Do not include http://[::1]:* because Chromium rejects bracketed IPv6 wildcards in CSP.
-    res.setHeader(
-      'Content-Security-Policy',
-      [
-        "default-src 'self'",
-        "script-src 'self'",
-        "style-src 'self' 'unsafe-inline'",
-        "font-src 'self' data:",
-        "img-src 'self' data: blob:",
-        "connect-src 'self' http://localhost:* http://127.0.0.1:*",
-        "object-src 'none'",
-        "base-uri 'self'",
-        "frame-ancestors 'self'",
-      ].join('; ')
-    );
-  }
-  next();
+    if (production) {
+      // Note: Do not include http://[::1]:* because Chromium rejects bracketed IPv6 wildcards in CSP.
+      res.setHeader(
+        'Content-Security-Policy',
+        [
+          "default-src 'self'",
+          "script-src 'self'",
+          "style-src 'self' 'unsafe-inline'",
+          "font-src 'self' data:",
+          "img-src 'self' data: blob:",
+          "connect-src 'self' http://localhost:* http://127.0.0.1:*",
+          "form-action 'self'",
+          "object-src 'none'",
+          "base-uri 'self'",
+          "frame-ancestors 'none'",
+        ].join('; ')
+      );
+    }
+    next();
+  };
 }
 
 // DNS-rebinding defense: when bound to loopback, only answer requests addressed to a loopback host name.
@@ -114,12 +117,15 @@ export interface CreateAppOptions {
   setupManager?: SetupManager;
   /** Automatic install/pull is only offered when the server is bound to loopback. */
   allowSetup?: boolean;
+  /** Override production header mode (defaults to NODE_ENV=production or --production). */
+  isProduction?: boolean;
 }
 
 export function createApp(options: CreateAppOptions = {}) {
   const bindHost = options.bindHost ?? HOST;
   const setupManager = options.setupManager ?? createSetupManager();
   const allowSetup = options.allowSetup ?? LOOPBACK_BIND_HOSTS.has(bindHost);
+  const productionHeaders = options.isProduction ?? isProduction;
   const app = express();
   app.disable('x-powered-by');
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -129,7 +135,7 @@ export function createApp(options: CreateAppOptions = {}) {
     }
     next();
   });
-  app.use(securityHeaders);
+  app.use(createSecurityHeaders(productionHeaders));
   app.use(express.json({ limit: '4mb' }));
   app.use('/api', sameOriginOnly);
 
