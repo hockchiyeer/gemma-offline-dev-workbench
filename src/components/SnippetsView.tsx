@@ -667,8 +667,9 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                     onChange={(e) => handleUpdate({ code: e.target.value })}
                     spellCheck={false}
                     aria-label="Code editor"
+                    wrap="off"
                     rows={16}
-                    className="block min-h-[260px] sm:min-h-[340px] w-full resize-y bg-transparent p-3 sm:p-4 font-mono text-[13px] leading-6 text-slate-900 outline-none dark:text-slate-100"
+                    className="block min-h-[260px] sm:min-h-[340px] w-full resize-y overflow-x-auto bg-transparent p-3 sm:p-4 font-mono text-[13px] leading-6 text-slate-900 outline-none dark:text-slate-100"
                   />
                 </div>
               ) : (

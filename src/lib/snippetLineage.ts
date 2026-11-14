@@ -58,12 +58,15 @@ export function extractFencedCodeBlocks(markdown: string): ExtractedCodeBlock[] 
       bodyLines.push(lines[i]);
       i++;
     }
-    if (i < lines.length && closeRegex.test(lines[i])) {
+    // A fence that never closes means the reply was cut off (token limit, Stop, or network abort):
+    // the code is incomplete, so it must not be saved as a new snippet version.
+    const closed = i < lines.length && closeRegex.test(lines[i]);
+    if (closed) {
       i++;
     }
 
     const code = bodyLines.join('\n').replace(/^\n+|\n+$/g, '');
-    if (code.trim().length > 0) {
+    if (closed && code.trim().length > 0) {
       blocks.push({
         code,
         rawLanguage,
@@ -73,6 +76,16 @@ export function extractFencedCodeBlocks(markdown: string): ExtractedCodeBlock[] 
   }
 
   return blocks;
+}
+
+/**
+ * Whether a finished Gemma reply should be saved automatically as child snippets.
+ * "Explain" replies typically quote illustrative fragments while explaining rather than
+ * producing a new refined version of the code; those fragments can still be saved via
+ * the code block's Save Snippet button.
+ */
+export function shouldAutoSaveChildSnippets(kind: SnippetActionKind): boolean {
+  return kind !== 'explain';
 }
 
 export function inferActionKindFromPrompt(

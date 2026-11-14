@@ -19,7 +19,7 @@ import {
   streamLocalGemmaChat,
   type ProbeResult,
 } from '../lib/gemmaClient';
-import { inferActionKindFromPrompt } from '../lib/snippetLineage';
+import { inferActionKindFromPrompt, shouldAutoSaveChildSnippets } from '../lib/snippetLineage';
 import type {
   ChatAttachmentRef,
   ChatMessage,
@@ -315,7 +315,9 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       const elapsed = Math.round(performance.now() - startedAt);
       const savedThinking = latestThinkingRef.current.trim() || undefined;
       const savedSnippets =
-        primarySnippetAttachment && finalText.trim()
+        primarySnippetAttachment &&
+        finalText.trim() &&
+        shouldAutoSaveChildSnippets(resolvedActionKind || 'chat')
           ? await onSaveGeneratedSnippets({
               parentSnippetId: primarySnippetAttachment.id,
               actionKind: resolvedActionKind || 'chat',

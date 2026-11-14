@@ -315,26 +315,24 @@ function AppShell() {
 
   const handleDeleteSnippet = async (id: string) => {
     const deleted = workspaceRef.current?.snippets.find((s) => s.id === id);
-    const rehomedChildren: CodeSnippet[] = [];
+    // Compute re-homed children synchronously from workspaceRef; React may run or
+    // re-run state updaters later or twice, making side-effect collection inside them unsafe.
+    const now = Date.now();
+    const rehomedChildren: CodeSnippet[] = (workspaceRef.current?.snippets ?? [])
+      .filter((s) => s.parentId === id)
+      .map((s) => ({ ...s, parentId: deleted?.parentId, updatedAt: now }));
+    const rehomedById = new Map(rehomedChildren.map((c) => [c.id, c]));
 
-    setWorkspace((prev) => {
-      if (!prev) return prev;
-      const nextSnippets = prev.snippets
-        .filter((s) => s.id !== id)
-        .map((s) => {
-          if (s.parentId === id) {
-            const updatedChild: CodeSnippet = {
-              ...s,
-              parentId: deleted?.parentId,
-              updatedAt: Date.now(),
-            };
-            rehomedChildren.push(updatedChild);
-            return updatedChild;
+    setWorkspace((prev) =>
+      prev
+        ? {
+            ...prev,
+            snippets: prev.snippets
+              .filter((s) => s.id !== id)
+              .map((s) => rehomedById.get(s.id) ?? s),
           }
-          return s;
-        });
-      return { ...prev, snippets: nextSnippets };
-    });
+        : prev
+    );
 
     await saveQueueRef.current.now(`snip:${id}`, () => removeSnippet(id));
     for (const child of rehomedChildren) {

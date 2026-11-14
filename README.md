@@ -8,7 +8,7 @@ Offline-first, self-sustaining coding workbench powered by locally installed **G
 - **Automatic Gemma Ranking**: Detects locally installed models and auto-selects the most capable one by blending generation and size (newest generation wins at equal size; Gemma 4 12B ≈ Gemma 3 27B class, so a large older model can still beat a tiny new one). Embedding/safety variants (`embeddinggemma`, `shieldgemma`) are never auto-selected, and future `gemma5+` tags rank automatically.
 - **Encrypted Local Database**: Stores snippets, Markdown docs, projects, and chat sessions in IndexedDB with optional **AES-256-GCM** encryption (`PBKDF2-SHA256`, 600,000 iterations, strict v2 per-record AAD binding, auto-lock timeout, passphrase rotation, and `.gvbackup` portable backups).
 - **Live Local-LLM Status Bar**: A bar under the header on every tab says whether the local LLM is up, starting, installing, or down, with the model name and Ollama version, so a loaded web page is never mistaken for a working AI. On phone screens, details collapse behind a tap toggle to preserve editor height. See [Is the local LLM up?](#is-the-local-llm-up).
-- **Versioned Snippet Lineage & AI Actions**: In **Snippets**, quick actions (**Explain**, **Debug**, **Refactor**, **Expand** to implement stubs/comment specs, and **Unit Tests**) or any snippet-attached **Gemma AI** prompt automatically save generated fenced code blocks beneath the source snippet as single or multiple child snippets (`v2`, `v3`, …). Derived children record the action, model, timestamp, and prompt in **Engineering Notes**, appear nested under their parent in the sidebar, and include clickable **Parent** / **Derived** links (plus direct jump links in chat) for repeatable iteration and traceability. Deleting an intermediate parent re-homes its direct children rather than orphaning them.
+- **Versioned Snippet Lineage & AI Actions**: One-tap **Explain**, **Debug**, **Refactor**, **Expand** and **Unit Tests** on any snippet. Code the model returns is saved beneath the source snippet as traceable child versions (`v2`, `v3`, …) with the action, model, time and prompt recorded. See [Snippet lineage & AI actions](#snippet-lineage--ai-actions).
 - **Reasoning You Can See and Control**: Gemma 4 "thinks" before it answers. The chat shows live progress (loading, reasoning, generating, with elapsed seconds) and a collapsible **Show reasoning** trace that is saved with each reply. **Runtime settings → Reasoning (Ollama)** can switch thinking off for much faster answers on CPU-only PCs. See [Slow or stuck answers](#slow-or-stuck-answers).
 - **Responsive Desktop & Mobile PWA**: Installable standalone Progressive Web App with bundled offline fonts (`Plus Jakarta Sans`, `DM Sans`, `JetBrains Mono`), dual light/dark themes, and phone-friendly editor headers with collapsible `Tools & AI` drawers so the code and Markdown editors stay usable on small screens.
 
@@ -94,6 +94,26 @@ Pick by RAM (sizes are approximate; tags change, so confirm with `ollama list` o
 
 Prefer **llama.cpp / LM Studio**? Start an OpenAI-compatible server (`llama-server -m gemma-4-e4b-it-Q4_K_M.gguf --port 1234 --ctx-size 8192`) and choose *OpenAI-compatible* in Runtime settings. The status bar then shows the model but no Ollama version, and setup and `--check` do not apply.
 
+## Snippet lineage & AI actions
+
+Open a snippet and use **Tools & AI** (on phones) or the toolbar (on larger screens). Each action sends the snippet to Gemma AI with a ready-made prompt, then files what comes back:
+
+| Action | Asks Gemma to | Reply saved as child snippet? |
+| --- | --- | --- |
+| **Explain** | Walk through the code step by step and note edge cases. | **No.** Explanations quote small fragments, not a new version. Save any fragment yourself with the code block's **Save Snippet** button. |
+| **Debug** | Audit for bugs, race conditions and security flaws, and return a fixed version. | Yes |
+| **Refactor** | Improve clarity, modularity and idiomatic style. | Yes |
+| **Expand** | Implement stubs, TODOs and comment specs into working code. | Yes |
+| **Unit Tests** | Write tests for normal and boundary cases. | Yes |
+| Any other prompt with a snippet attached (paperclip) | Whatever you ask. | Yes, labelled **AI Variant** |
+
+**How children are saved**
+
+- Every complete fenced code block in the reply becomes one child (`v2 Refactor (1/2) · <parent title>`), nested under its parent in the list. A code block that never closes, because the reply hit the token limit or you pressed Stop, is ignored, so half-written code is never saved as a version.
+- A child records the action, model, capture time and prompt in **Engineering Notes**, inherits the parent's tags plus an action tag, and shows **Parent** and **Derived** links so you can jump between versions. Chat replies link straight to the snippets they created.
+- Deleting a snippet keeps its children: they move up to the deleted snippet's parent.
+- Children are ordinary snippets: they are searchable, editable, covered by vault encryption and included in `.gvbackup` files.
+
 ## Slow or stuck answers
 
 Gemma 4 normally *reasons* before it writes the answer. On a CPU-only machine that phase can take minutes for a simple question, so the chat shows what it is doing while you wait:
@@ -119,6 +139,7 @@ Gemma 4 normally *reasons* before it writes the answer. On a CPU-only machine th
 | Message | Fix |
 | --- | --- |
 | `…used its entire token budget on reasoning and produced no answer` | Raise *Max Output Tokens*, or set Reasoning to Off. |
+| `…finished reasoning without producing a final answer` | Rephrase the prompt, or raise *Max Output Tokens*. |
 | `…returned an empty answer with Reasoning turned off` | This Ollama build needs thinking on: set Reasoning back to Auto. |
 | `The local model stopped responding (no data received)` | Check that Ollama is running and the model fits in RAM (`ollama ps`), then retry. |
 
