@@ -19,10 +19,19 @@ export default defineConfig(() => {
               enforce: 'post' as const,
               transform(code: string, id: string) {
                 if (id.includes('/vite/dist/client/client.mjs')) {
-                  return code.replace(
-                    'transport.connect(createHMRHandler(handleMessage));',
-                    '/* HMR WebSocket disabled via DISABLE_HMR=true */'
-                  );
+                  return code
+                    .replace(
+                      'transport.connect(createHMRHandler(handleMessage));',
+                      '/* HMR WebSocket disabled via DISABLE_HMR=true */'
+                    )
+                    .replace(
+                      'else throw new SendBeforeConnectError("send was called before connect");',
+                      'else return;'
+                    )
+                    .replace(
+                      'else throw new SendBeforeConnectError("invoke was called before connect");',
+                      'else return undefined;'
+                    );
                 }
               },
             },

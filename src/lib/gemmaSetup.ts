@@ -24,6 +24,8 @@ export interface SetupSystem {
   totalMemGiB: number;
   ollamaInstalled: boolean;
   ollamaRunning: boolean;
+  ollamaPath?: string | null;
+  ollamaOnPath?: boolean;
   installedModels: string[];
   recommendedModel: string;
 }

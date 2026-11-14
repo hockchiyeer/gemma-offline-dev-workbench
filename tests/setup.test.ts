@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import type { AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import {
+  appendDirToPathValue,
   createSetupManager,
+  ensureOllamaOnPath,
   isAllowedGemmaTag,
+  isDirInPath,
   pullModel,
   recommendModel,
+  toPosixPath,
   type SetupDeps,
 } from '../server/ollamaSetup.ts';
 import { createApp } from '../server.ts';
@@ -19,6 +26,16 @@ function fakeDeps(over: Partial<SetupDeps> = {}) {
     platform: 'win32',
     totalMem: () => 16 * 2 ** 30,
     findBinary: () => (installed ? 'C:\\ollama.exe' : null),
+    ensureOnPath: (binPath) => {
+      calls.push(`path:${binPath}`);
+      return {
+        binDir: path.dirname(binPath),
+        alreadyInProcessPath: true,
+        addedToProcessPath: false,
+        addedToUserEnv: false,
+        updatedProfiles: [],
+      };
+    },
     listModels: async () => (serving ? [...models] : null),
     installOllama: async () => {
       calls.push('install');
@@ -62,21 +79,21 @@ test('only Gemma-family tags are accepted', () => {
   }
 });
 
-test('fresh Windows machine: install → start service → pull Gemma', async () => {
+test('fresh Windows machine: install → configure PATH → start service → pull Gemma', async () => {
   const { deps, calls } = fakeDeps();
   const final = await createSetupManager(deps).runToCompletion();
   assert.equal(final.phase, 'done');
-  assert.deepEqual(calls, ['install', 'serve', 'pull:gemma4:e4b']);
+  assert.deepEqual(calls, ['install', 'path:C:\\ollama.exe', 'serve', 'pull:gemma4:e4b']);
 });
 
-test('already installed and running: only pulls the model; skips pull if present', async () => {
+test('already installed and running: ensures PATH, pulls missing model, skips pull if present', async () => {
   const a = fakeDeps({ findBinary: () => 'C:\\ollama.exe', listModels: async () => [] });
   assert.equal((await createSetupManager(a.deps).runToCompletion('gemma4:e2b')).phase, 'done');
-  assert.deepEqual(a.calls, ['pull:gemma4:e2b']);
+  assert.deepEqual(a.calls, ['path:C:\\ollama.exe', 'pull:gemma4:e2b']);
 
   const b = fakeDeps({ findBinary: () => 'C:\\ollama.exe', listModels: async () => ['gemma4:e4b'] });
   assert.equal((await createSetupManager(b.deps).runToCompletion('gemma4:e4b')).phase, 'done');
-  assert.deepEqual(b.calls, []);
+  assert.deepEqual(b.calls, ['path:C:\\ollama.exe']);
 });
 
 test('installer failure surfaces as an error and pulls nothing', async () => {
@@ -181,4 +198,80 @@ test('pullModel parses a real chunked NDJSON stream and reports progress; surfac
     /does not exist/
   );
   errServer.close();
+});
+
+test('PATH helpers detect existing entries cleanly across separators, casing, and trailing slashes', () => {
+  assert.equal(
+    isDirInPath(
+      'C:\\Users\\Dev\\AppData\\Local\\Programs\\Ollama',
+      'C:\\Windows\\system32;"c:\\users\\dev\\appdata\\local\\programs\\ollama\\"',
+      'win32'
+    ),
+    true
+  );
+  assert.equal(isDirInPath('C:\\Ollama', 'C:\\Windows\\system32', 'win32'), false);
+  assert.equal(
+    toPosixPath('C:\\Users\\Dev\\AppData\\Local\\Programs\\Ollama'),
+    '/c/Users/Dev/AppData/Local/Programs/Ollama'
+  );
+  assert.deepEqual(appendDirToPathValue('C:\\Windows;', 'C:\\Ollama', 'win32'), {
+    updated: 'C:\\Windows;C:\\Ollama',
+    changed: true,
+  });
+  assert.deepEqual(appendDirToPathValue('C:\\Windows;c:\\ollama', 'C:\\Ollama', 'win32'), {
+    updated: 'C:\\Windows;c:\\ollama',
+    changed: false,
+  });
+});
+
+test('ensureOllamaOnPath updates Windows User PATH and shell profile idempotently when missing', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gv-home-'));
+  const bashrc = path.join(home, '.bashrc');
+  fs.writeFileSync(bashrc, 'export FOO=bar\n', 'utf8');
+
+  let persistedUserPath = 'C:\\Users\\Dev\\bin';
+  const env: NodeJS.ProcessEnv = { PATH: 'C:\\Windows\\System32', Path: 'C:\\Windows\\System32' };
+  const winBin = 'C:\\Users\\Dev\\AppData\\Local\\Programs\\Ollama\\ollama.exe';
+  const winDir = 'C:\\Users\\Dev\\AppData\\Local\\Programs\\Ollama';
+
+  try {
+    const first = ensureOllamaOnPath(winBin, {
+      platform: 'win32',
+      env,
+      homeDir: home,
+      readWinPaths: () => ({ userPath: persistedUserPath, machinePath: 'C:\\Windows\\System32' }),
+      writeWinUserPath: (next) => {
+        persistedUserPath = next;
+        return true;
+      },
+    });
+
+    assert.equal(first.alreadyInProcessPath, false);
+    assert.equal(first.addedToProcessPath, true);
+    assert.equal(first.addedToUserEnv, true);
+    assert.deepEqual(first.updatedProfiles, [bashrc]);
+    assert.ok(isDirInPath(winDir, env.PATH, 'win32'));
+    assert.ok(isDirInPath(winDir, persistedUserPath, 'win32'));
+
+    const profileText = fs.readFileSync(bashrc, 'utf8');
+    assert.match(profileText, /\/c\/Users\/Dev\/AppData\/Local\/Programs\/Ollama/);
+
+    // Second run is a complete no-op (no duplicate entries)
+    const second = ensureOllamaOnPath(winBin, {
+      platform: 'win32',
+      env,
+      homeDir: home,
+      readWinPaths: () => ({ userPath: persistedUserPath, machinePath: 'C:\\Windows\\System32' }),
+      writeWinUserPath: () => {
+        throw new Error('Should not rewrite User PATH when already present');
+      },
+    });
+
+    assert.equal(second.alreadyInProcessPath, true);
+    assert.equal(second.addedToUserEnv, false);
+    assert.deepEqual(second.updatedProfiles, []);
+    assert.equal(fs.readFileSync(bashrc, 'utf8'), profileText);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

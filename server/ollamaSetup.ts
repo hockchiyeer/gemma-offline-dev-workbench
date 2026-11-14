@@ -57,8 +57,18 @@ export interface SystemInfo {
   totalMemGiB: number;
   ollamaInstalled: boolean;
   ollamaRunning: boolean;
+  ollamaPath: string | null;
+  ollamaOnPath: boolean;
   installedModels: string[];
   recommendedModel: string;
+}
+
+export interface EnsurePathResult {
+  binDir: string;
+  alreadyInProcessPath: boolean;
+  addedToProcessPath: boolean;
+  addedToUserEnv: boolean;
+  updatedProfiles: string[];
 }
 
 // ---------- low-level helpers (all injectable for tests) ----------
@@ -93,6 +103,202 @@ export function findOllamaBinary(
     }
   }
   return null;
+}
+
+function normalizePathEntry(entry: string, platform: NodeJS.Platform): string {
+  const unquoted = entry.trim().replace(/^"(.*)"$/, '$1');
+  const trimmed = unquoted.replace(/[\\/]+$/, '');
+  return platform === 'win32' ? trimmed.toLowerCase() : trimmed;
+}
+
+export function isDirInPath(
+  dir: string,
+  pathValue: string | undefined,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  const target = normalizePathEntry(dir, platform);
+  if (!target || !pathValue) return false;
+  const sep = platform === 'win32' ? ';' : ':';
+  return pathValue
+    .split(sep)
+    .some((part) => normalizePathEntry(part, platform) === target);
+}
+
+export function appendDirToPathValue(
+  currentPath: string | undefined,
+  dir: string,
+  platform: NodeJS.Platform = process.platform
+): { updated: string; changed: boolean } {
+  const sep = platform === 'win32' ? ';' : ':';
+  const cleanDir = dir.trim();
+  if (!cleanDir) return { updated: currentPath || '', changed: false };
+  if (isDirInPath(cleanDir, currentPath, platform)) {
+    return { updated: currentPath || '', changed: false };
+  }
+  const existing = (currentPath || '').trim();
+  if (!existing) return { updated: cleanDir, changed: true };
+  const needsSep = !existing.endsWith(sep);
+  return { updated: `${existing}${needsSep ? sep : ''}${cleanDir}`, changed: true };
+}
+
+export function toPosixPath(winPath: string): string {
+  const match = winPath.match(/^([A-Za-z]):[\\/](.*)$/);
+  if (!match) return winPath.replace(/\\/g, '/');
+  return `/${match[1].toLowerCase()}/${match[2].replace(/\\/g, '/')}`;
+}
+
+function readWindowsEnvPaths(): { userPath: string; machinePath: string } | null {
+  const script =
+    '[pscustomobject]@{ ' +
+    "User = [Environment]::GetEnvironmentVariable('Path', 'User'); " +
+    "Machine = [Environment]::GetEnvironmentVariable('Path', 'Machine') " +
+    '} | ConvertTo-Json -Compress';
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 15_000,
+  });
+  if (r.status !== 0) return null;
+  try {
+    const parsed = JSON.parse((r.stdout || '').trim()) as {
+      User?: string | null;
+      Machine?: string | null;
+    };
+    return { userPath: parsed.User || '', machinePath: parsed.Machine || '' };
+  } catch {
+    return null;
+  }
+}
+
+function writeWindowsUserPath(nextUserPath: string): boolean {
+  const script = "[Environment]::SetEnvironmentVariable('Path', $env:GV_USER_PATH, 'User')";
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    env: { ...process.env, GV_USER_PATH: nextUserPath },
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 15_000,
+  });
+  return r.status === 0;
+}
+
+const PROFILE_MARKER = '# >>> GemmaVault Ollama PATH >>>';
+const PROFILE_END = '# <<< GemmaVault Ollama PATH <<<';
+
+function updateShellProfile(profileFile: string, posixDir: string): boolean {
+  let content = '';
+  try {
+    content = fs.readFileSync(profileFile, 'utf8');
+  } catch {
+    return false;
+  }
+  if (content.includes(PROFILE_MARKER) || content.includes(posixDir)) {
+    return false;
+  }
+  const safeDir = posixDir.replace(/"/g, '\\"');
+  const block =
+    `\n${PROFILE_MARKER}\n` +
+    `if [ -d "${safeDir}" ]; then\n` +
+    `  case ":$PATH:" in\n` +
+    `    *":${safeDir}:"*) ;;\n` +
+    `    *) export PATH="$PATH:${safeDir}" ;;\n` +
+    `  esac\n` +
+    `fi\n` +
+    `${PROFILE_END}\n`;
+  fs.writeFileSync(profileFile, `${content}${content.endsWith('\n') || !content ? '' : '\n'}${block}`, 'utf8');
+  return true;
+}
+
+export interface EnsurePathOptions {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  readWinPaths?: () => { userPath: string; machinePath: string } | null;
+  writeWinUserPath?: (nextUserPath: string) => boolean;
+}
+
+/**
+ * Ensures the directory containing the Ollama binary is configured on PATH:
+ * - Updates the current Node process env immediately.
+ * - On Windows, appends to persistent HKCU User PATH (without setx 1024-char truncation)
+ *   if absent from both User and Machine PATH.
+ * - Updates existing shell profile files (.bashrc / .bash_profile / .zshrc / .profile),
+ *   or creates ~/.bashrc on Git Bash when running under MSYSTEM without a bashrc yet.
+ */
+export function ensureOllamaOnPath(
+  binPath: string,
+  opts: EnsurePathOptions = {}
+): EnsurePathResult {
+  const platform = opts.platform ?? process.platform;
+  const pathImpl = platform === 'win32' ? path.win32 : path.posix;
+  const env = opts.env ?? process.env;
+  const homeDir = opts.homeDir ?? os.homedir();
+  const binDir = pathImpl.dirname(binPath);
+
+  const currentProcPath = env.PATH || env.Path || '';
+  const alreadyInProcessPath = isDirInPath(binDir, currentProcPath, platform);
+  let addedToProcessPath = false;
+
+  if (!alreadyInProcessPath) {
+    const { updated, changed } = appendDirToPathValue(currentProcPath, binDir, platform);
+    if (changed) {
+      env.PATH = updated;
+      if (platform === 'win32') env.Path = updated;
+      addedToProcessPath = true;
+    }
+  }
+
+  let addedToUserEnv = false;
+  if (platform === 'win32') {
+    const readPaths = opts.readWinPaths ?? readWindowsEnvPaths;
+    const writePath = opts.writeWinUserPath ?? writeWindowsUserPath;
+    const winPaths = readPaths();
+    if (
+      winPaths &&
+      !isDirInPath(binDir, winPaths.userPath, 'win32') &&
+      !isDirInPath(binDir, winPaths.machinePath, 'win32')
+    ) {
+      const { updated, changed } = appendDirToPathValue(winPaths.userPath, binDir, 'win32');
+      if (changed && writePath(updated)) {
+        addedToUserEnv = true;
+      }
+    }
+  }
+
+  const updatedProfiles: string[] = [];
+  const needsProfileCheck = !alreadyInProcessPath || addedToUserEnv;
+  if (needsProfileCheck && homeDir) {
+    const posixDir = platform === 'win32' ? toPosixPath(binDir) : binDir;
+    const candidates =
+      platform === 'win32'
+        ? ['.bashrc', '.bash_profile', '.profile']
+        : ['.zshrc', '.bashrc', '.bash_profile', '.profile'];
+
+    if (platform === 'win32' && env.MSYSTEM) {
+      const bashrc = path.join(homeDir, '.bashrc');
+      if (!fs.existsSync(bashrc)) {
+        try {
+          fs.writeFileSync(bashrc, '', 'utf8');
+        } catch {
+          /* ignore read-only home */
+        }
+      }
+    }
+
+    for (const name of candidates) {
+      const target = path.join(homeDir, name);
+      if (fs.existsSync(target) && updateShellProfile(target, posixDir)) {
+        updatedProfiles.push(target);
+      }
+    }
+  }
+
+  return {
+    binDir,
+    alreadyInProcessPath,
+    addedToProcessPath,
+    addedToUserEnv,
+    updatedProfiles,
+  };
 }
 
 export async function listInstalledModels(base = OLLAMA_BASE): Promise<string[] | null> {
@@ -237,6 +443,7 @@ export interface SetupDeps {
   platform: NodeJS.Platform;
   totalMem: () => number;
   findBinary: () => string | null;
+  ensureOnPath: (binPath: string) => EnsurePathResult;
   listModels: () => Promise<string[] | null>;
   installOllama: (
     onPhase: (phase: SetupPhase, message: string, pct: number | null) => void,
@@ -280,6 +487,7 @@ export const defaultDeps: SetupDeps = {
   platform: process.platform,
   totalMem: () => os.totalmem(),
   findBinary: () => findOllamaBinary(),
+  ensureOnPath: (binPath) => ensureOllamaOnPath(binPath),
   listModels: () => listInstalledModels(),
   installOllama: defaultInstall,
   startServe: spawnOllamaServe,
@@ -344,6 +552,16 @@ export function createSetupManager(deps: SetupDeps = defaultDeps) {
       models = await deps.listModels();
     }
 
+    if (bin) {
+      const pathRes = deps.ensureOnPath(bin);
+      if (pathRes.addedToUserEnv) {
+        note(`Added ${pathRes.binDir} to Windows User PATH.`);
+      }
+      if (pathRes.updatedProfiles.length > 0) {
+        note(`Updated shell profile: ${pathRes.updatedProfiles.join(', ')}`);
+      }
+    }
+
     if (models === null) {
       set({ phase: 'starting-ollama', message: 'Starting the local Ollama service…', percent: null });
       if (!bin) throw new Error('Ollama service is not running and no binary was found to start it.');
@@ -376,12 +594,18 @@ export function createSetupManager(deps: SetupDeps = defaultDeps) {
   return {
     getState: (): SetupState => state,
     async getSystemInfo(): Promise<SystemInfo> {
-      const models = await deps.listModels();
+      const [models, bin] = await Promise.all([deps.listModels(), Promise.resolve(deps.findBinary())]);
+      const pathImpl = deps.platform === 'win32' ? path.win32 : path.posix;
+      const ollamaOnPath = Boolean(
+        bin && isDirInPath(pathImpl.dirname(bin), process.env.PATH || process.env.Path, deps.platform)
+      );
       return {
         platform: deps.platform,
         totalMemGiB: Math.round((deps.totalMem() / 2 ** 30) * 10) / 10,
-        ollamaInstalled: Boolean(deps.findBinary()) || models !== null,
+        ollamaInstalled: Boolean(bin) || models !== null,
         ollamaRunning: models !== null,
+        ollamaPath: bin,
+        ollamaOnPath,
         installedModels: models || [],
         recommendedModel: recommendModel(deps.totalMem()),
       };

@@ -12,8 +12,13 @@ const flag = (name: string) => {
 
 const manager = createSetupManager();
 const system = await manager.getSystemInfo();
+const pathNote = !system.ollamaInstalled
+  ? 'n/a'
+  : system.ollamaOnPath
+    ? 'on PATH'
+    : 'not on PATH yet';
 console.log(
-  `System: ${system.platform}, ${system.totalMemGiB} GiB RAM · Ollama ${system.ollamaInstalled ? 'installed' : 'NOT installed'}` +
+  `System: ${system.platform}, ${system.totalMemGiB} GiB RAM · Ollama ${system.ollamaInstalled ? 'installed' : 'NOT installed'} (${pathNote})` +
     ` · service ${system.ollamaRunning ? 'running' : 'stopped'} · models: ${system.installedModels.join(', ') || 'none'}`
 );
 
@@ -40,6 +45,11 @@ process.on('SIGINT', () => manager.cancel());
 const final = await manager.runToCompletion(model);
 clearInterval(timer);
 if (final.phase === 'done') {
+  for (const entry of final.log) {
+    if (entry.includes('PATH') || entry.includes('profile')) {
+      console.log(`ℹ ${entry}`);
+    }
+  }
   console.log(`\n✔ ${final.message}\nStart the app with: npm run build && npm start`);
 } else {
   console.error(`\n✖ ${final.error ?? final.message}`);
