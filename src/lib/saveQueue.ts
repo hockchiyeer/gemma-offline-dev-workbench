@@ -7,12 +7,17 @@ export type SaveTask = () => Promise<void>;
  * - flushAll(): drains all pending writes and resolves when the serialized chain settles.
  */
 export class SaveQueue {
-  private pending = new Map<string, { task: SaveTask; timer: ReturnType<typeof setTimeout> }>();
+  private pending = new Map<
+    string,
+    { task: SaveTask; timer: ReturnType<typeof setTimeout>; firstAt: number }
+  >();
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly delayMs = 400,
-    private readonly onError: (err: unknown) => void = () => {}
+    private readonly onError: (err: unknown) => void = () => {},
+    /** Upper bound on how long continuous edits/token streaming can postpone a write. */
+    private readonly maxWaitMs = 1500
   ) {}
 
   pendingCount(): number {
@@ -22,10 +27,13 @@ export class SaveQueue {
   schedule(key: string, task: SaveTask, delayMs = this.delayMs): void {
     const prev = this.pending.get(key);
     if (prev) clearTimeout(prev.timer);
+    const firstAt = prev?.firstAt ?? Date.now();
+    // Pure debounce starves under continuous updates (e.g. a long streamed reply): cap the wait.
+    const wait = Math.max(0, Math.min(delayMs, firstAt + this.maxWaitMs - Date.now()));
     const timer = setTimeout(() => {
       void this.run(key);
-    }, delayMs);
-    this.pending.set(key, { task, timer });
+    }, wait);
+    this.pending.set(key, { task, timer, firstAt });
   }
 
   now(key: string, task: SaveTask): Promise<void> {
@@ -70,7 +78,8 @@ export class SaveQueue {
 
 export function createSaveQueue(
   defaultDelayMs = 400,
-  onError?: (err: unknown) => void
+  onError?: (err: unknown) => void,
+  maxWaitMs = 1500
 ): SaveQueue {
-  return new SaveQueue(defaultDelayMs, onError);
+  return new SaveQueue(defaultDelayMs, onError, maxWaitMs);
 }

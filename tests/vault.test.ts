@@ -15,6 +15,7 @@ import {
   classifyAndRankModel,
   isLoopbackBaseUrl,
   parseParamBillions,
+  pickRecommendedModel,
 } from '../src/lib/gemmaClient.ts';
 import { createSaveQueue } from '../src/lib/saveQueue.ts';
 import { analyzeCodeLocally, normalizeLanguage, tokenizeLine } from '../src/lib/syntax.ts';
@@ -62,38 +63,33 @@ test('Passphrase strength evaluator enforces minimum length', () => {
   assert.equal(evaluatePassphraseStrength('Correct!Horse#2026').label, 'Strong passphrase');
 });
 
-test('Gemma model classifier ranks Gemma 4 > Gemma 3n > Gemma 3 > Gemma 2 > CodeGemma and handles bare gemma4', () => {
-  const models = [
-    classifyAndRankModel('codegemma:7b'),
-    classifyAndRankModel('gemma2:27b'),
-    classifyAndRankModel('gemma3:12b'),
-    classifyAndRankModel('gemma3n:e4b'),
-    classifyAndRankModel('gemma4:e2b'),
-    classifyAndRankModel('gemma4'),
-    classifyAndRankModel('gemma4:26b'),
-    classifyAndRankModel('gemma4:31b'),
-    classifyAndRankModel('llama3.2:3b'),
-  ].sort((a, b) => b.rankScore - a.rankScore);
-
-  assert.deepEqual(
-    models.map((m) => m.name),
-    [
-      'gemma4:31b',
-      'gemma4:26b',
-      'gemma4',
-      'gemma4:e2b',
-      'gemma3n:e4b',
-      'gemma3:12b',
-      'gemma2:27b',
-      'codegemma:7b',
-      'llama3.2:3b',
-    ]
-  );
-  assert.equal(models[0].family, 'gemma4');
-  assert.equal(models[2].parameterLabel, 'E4B');
-  assert.equal(models[4].family, 'gemma3n');
+test('Gemma ranking: newest generation wins at equal size, big older models can beat tiny new ones', () => {
+  const rank = (n: string) => classifyAndRankModel(n).rankScore;
+  assert.ok(rank('gemma4:31b') > rank('gemma4:26b'));
+  assert.ok(rank('gemma4:26b') > rank('gemma4:12b'));
+  assert.ok(rank('gemma4:12b') > rank('gemma3:27b'), 'Gemma 4 12B is Gemma 3 27B class');
+  assert.ok(rank('gemma4:12b') > rank('gemma3:12b'));
+  assert.ok(rank('gemma3:27b') > rank('gemma4:e2b'));
+  assert.ok(rank('gemma4:e4b') > rank('gemma4:e2b'));
+  assert.equal(rank('gemma4'), rank('gemma4:e4b'), 'bare gemma4 aliases to E4B');
+  assert.ok(rank('gemma3:27b') > rank('gemma2:27b'));
+  assert.ok(rank('gemma2:27b') > rank('codegemma:7b'));
+  assert.ok(rank('gemma5:12b') > rank('gemma4:12b'), 'future generations rank automatically');
+  assert.equal(classifyAndRankModel('gemma4:e4b').family, 'gemma4');
+  assert.equal(classifyAndRankModel('gemma3n:e4b').family, 'gemma3n');
+  assert.equal(classifyAndRankModel('hf.co/x/gemma-3-12b-it-GGUF:Q4_K_M').family, 'gemma3');
+  assert.equal(classifyAndRankModel('llama3.2:3b').rankScore, 0);
   assert.deepEqual(parseParamBillions('gemma4:e4b'), { label: 'E4B', billions: 4 });
   assert.deepEqual(parseParamBillions('gemma4:31b'), { label: '31B', billions: 31 });
+});
+
+test('Embedding/safety Gemma variants are never auto-selected', () => {
+  const models = ['embeddinggemma:300m', 'shieldgemma:2b', 'llama3.2:3b', 'gemma3:4b'].map((n) =>
+    classifyAndRankModel(n)
+  );
+  assert.equal(pickRecommendedModel(models)?.id, 'gemma3:4b');
+  const noChatGemma = ['embeddinggemma:300m', 'llama3.2:3b'].map((n) => classifyAndRankModel(n));
+  assert.equal(pickRecommendedModel(noChatGemma)?.id, 'llama3.2:3b');
 });
 
 test('Loopback URL validator blocks remote and credentialed URLs', () => {
@@ -222,4 +218,19 @@ test('Backup parser and runtime config sanitizer enforce safe bounds', () => {
   assert.equal(sanitized.temperature, 2);
   assert.equal(sanitized.maxTokens, 64);
   assert.equal(sanitized.contextTokens, 262144);
+});
+
+test('SaveQueue maxWait: continuous updates (streaming) still reach the database', async () => {
+  const queue = createSaveQueue(50, () => {}, 120);
+  const writes: number[] = [];
+  const t0 = Date.now();
+  const iv = setInterval(
+    () => queue.schedule('chat:1', async () => void writes.push(Date.now() - t0)),
+    10
+  );
+  await new Promise((r) => setTimeout(r, 320));
+  clearInterval(iv);
+  const duringStream = writes.length;
+  await queue.flushAll();
+  assert.ok(duringStream >= 2, `expected periodic writes while streaming, got ${duringStream}`);
 });

@@ -5,7 +5,7 @@ Offline-first, self-sustaining coding workbench powered by locally installed **G
 ## Features
 
 - **100% Offline & Local AI**: Connects exclusively to loopback inference servers (`127.0.0.1` / `localhost`) via Ollama or OpenAI-compatible runtimes (`llama.cpp`, LM Studio). No cloud API keys or paid subscriptions required.
-- **Automatic Gemma Ranking**: Detects locally installed models and prioritizes the newest free Google Gemma generation (`Gemma 4 > Gemma 3n > Gemma 3 > Gemma 2 > CodeGemma`) and parameter size.
+- **Automatic Gemma Ranking**: Detects locally installed models and auto-selects the most capable one by blending generation and size (newest generation wins at equal size; Gemma 4 12B ≈ Gemma 3 27B class, so a large older model can still beat a tiny new one). Embedding/safety variants (`embeddinggemma`, `shieldgemma`) are never auto-selected, and future `gemma5+` tags rank automatically.
 - **Encrypted Local Database**: Stores snippets, Markdown docs, projects, and chat sessions in IndexedDB with optional **AES-256-GCM** encryption (`PBKDF2-SHA256`, 600,000 iterations, strict v2 per-record AAD binding, auto-lock timeout, passphrase rotation, and `.gvbackup` portable backups).
 - **Responsive Desktop & Mobile PWA**: Installable standalone Progressive Web App with bundled offline fonts (`Plus Jakarta Sans`, `DM Sans`, `JetBrains Mono`), dual light/dark themes, and adaptive layouts for desktop monitors and mobile viewports.
 
@@ -48,6 +48,7 @@ npm test
 ## Network & Security Notes
 
 - **Loopback by default.** Locally, the server binds to `127.0.0.1` and rejects requests whose `Host` header is not a loopback name (DNS-rebinding defense). To use GemmaVault from a phone on your Wi-Fi, opt in explicitly: `HOST=0.0.0.0 npm start`. The app has no login, so only do this on a trusted network; enable the vault passphrase first.
+- **Containers.** When `K_SERVICE` or `APP_URL` is set (managed container hosts) the server binds `0.0.0.0` by default and the Host-header and setup-endpoint guards relax accordingly; set `HOST=127.0.0.1` to force loopback.
 - **Installed PWA without the Node server.** The browser then talks to Ollama directly, which requires CORS: `OLLAMA_ORIGINS="http://localhost:3000" ollama serve`.
 - **Encryption is opt-in.** Until you set a passphrase in *Vault DB*, data is stored unencrypted in IndexedDB. A lost passphrase cannot be recovered — keep a `.gvbackup`.
 - **Multiple tabs.** Locking one tab locks all; changing encryption or importing a backup reloads the others.

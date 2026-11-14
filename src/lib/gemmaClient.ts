@@ -50,46 +50,82 @@ export function parseParamBillions(lower: string): { label: string; billions: nu
   return { label: rawToken.toUpperCase(), billions: numeric };
 }
 
-// Rank free Google Gemma models from most advanced (Gemma 4) to lightest
+// Tags without an explicit size resolve to these defaults in the Ollama library.
+const LATEST_TAG_PARAMS: Record<string, number> = {
+  gemma4: 4,
+  gemma3n: 4,
+  gemma3: 4,
+  gemma2: 9,
+  codegemma: 7,
+  gemma: 7,
+};
+
+/** Embedding / safety-classifier / vision-only variants cannot chat and must never be auto-selected. */
+const NON_CHAT_RE = /(embedding|shield|siglip|paligemma)/;
+
+/**
+ * Capability multiplier per generation. A newer generation is worth ≈2.4x the parameters of
+ * Gemma 3 (Gemma 4 12B ≈ Gemma 3 27B class), so a large older model can still beat a tiny
+ * new one while, at equal size, the newest generation always wins. Future generations
+ * (gemma5, ...) scale upward automatically instead of falling into a generic bucket.
+ */
+export function generationFactor(family: GemmaModelInfo['family'], generation: number): number {
+  if (family === 'codegemma') return 0.6;
+  if (generation >= 4) return 2.4 + (generation - 4) * 0.8;
+  if (generation === 3) return 1.0;
+  if (generation === 2) return 0.7;
+  return 0.5;
+}
+
+// Rank free Google Gemma models: higher = more capable. Non-chat variants and non-Gemma models rank 0.
 export function classifyAndRankModel(
   name: string,
   sizeBytes?: number,
   quantization?: string
 ): GemmaModelInfo {
   const lower = name.toLowerCase();
+  const base = lower.split('/').pop() || lower;
   let family: GemmaModelInfo['family'] = 'other';
-  let rankScore = 10;
+  let generation = 0;
 
-  if (/(?:^|[/:_-])gemma-?4(?:$|[/:_.-])/.test(lower) || lower.includes('gemma4')) {
-    family = 'gemma4';
-    rankScore = 2000;
-  } else if (/(?:^|[/:_-])gemma-?3n(?:$|[/:_.-])/.test(lower) || lower.includes('gemma3n')) {
-    family = 'gemma3n';
-    rankScore = 1100;
-  } else if (/(?:^|[/:_-])gemma-?3(?:$|[/:_.-])/.test(lower) || lower.includes('gemma3')) {
-    family = 'gemma3';
-    rankScore = 1000;
-  } else if (/(?:^|[/:_-])gemma-?2(?:$|[/:_.-])/.test(lower) || lower.includes('gemma2')) {
-    family = 'gemma2';
-    rankScore = 700;
-  } else if (lower.includes('codegemma')) {
+  const gen = base.match(/gemma[-_ ]?(\d+)(n)?(?![a-z0-9])/);
+  if (base.includes('codegemma')) {
     family = 'codegemma';
-    rankScore = 650;
-  } else if (lower.includes('gemma')) {
+    generation = 1;
+  } else if (gen) {
+    generation = parseInt(gen[1], 10);
+    family =
+      generation === 4
+        ? 'gemma4'
+        : generation === 3
+          ? gen[2]
+            ? 'gemma3n'
+            : 'gemma3'
+          : generation === 2
+            ? 'gemma2'
+            : 'gemma';
+  } else if (base.includes('gemma')) {
     family = 'gemma';
-    rankScore = 500;
+    generation = 1;
   }
 
   let parameterLabel = '';
+  let billions = 0;
   const parsedParam = parseParamBillions(lower);
   if (parsedParam) {
     parameterLabel = parsedParam.label;
-    rankScore += parsedParam.billions * 10;
-  } else if (family === 'gemma4' && !lower.includes(':')) {
+    billions = parsedParam.billions;
+  } else if (family !== 'other') {
+    billions = LATEST_TAG_PARAMS[family] ?? 0;
     // Bare "gemma4" tag in Ollama aliases to E4B
-    parameterLabel = 'E4B';
-    rankScore += 40;
+    if (family === 'gemma4' && !lower.includes(':')) parameterLabel = 'E4B';
   }
+
+  const chatCapable = !NON_CHAT_RE.test(base);
+  const rankScore =
+    family === 'other' || !chatCapable
+      ? 0
+      : Math.max(0.1, billions) * generationFactor(family, generation);
 
   return {
     id: name,
@@ -100,6 +136,16 @@ export function classifyAndRankModel(
     quantization,
     rankScore,
   };
+}
+
+/** Best installed chat-capable Gemma; falls back to any other model, never an embedding/safety variant. */
+export function pickRecommendedModel(models: GemmaModelInfo[]): GemmaModelInfo | null {
+  const sorted = [...models].sort((a, b) => b.rankScore - a.rankScore);
+  return (
+    sorted.find((m) => m.family !== 'other' && m.rankScore > 0) ||
+    sorted.find((m) => m.family === 'other') ||
+    null
+  );
 }
 
 export async function inspectWebGPU(): Promise<WebGPUStatus> {
@@ -187,8 +233,7 @@ export async function probeLocalGemmaRuntime(config: LocalRuntimeConfig): Promis
     if (resp.ok) {
       const json = await resp.json();
       const models = await parseModelsResponse(config.kind, json);
-      const gemmaModels = models.filter((m) => m.family !== 'other');
-      const recommendedModel = gemmaModels[0] || models[0] || null;
+      const recommendedModel = pickRecommendedModel(models);
       return {
         connected: true,
         transport: 'direct',
@@ -216,8 +261,7 @@ export async function probeLocalGemmaRuntime(config: LocalRuntimeConfig): Promis
       const wrapper = (await resp.json()) as { ok?: boolean; data?: unknown };
       if (wrapper.ok && wrapper.data) {
         const models = await parseModelsResponse(config.kind, wrapper.data);
-        const gemmaModels = models.filter((m) => m.family !== 'other');
-        const recommendedModel = gemmaModels[0] || models[0] || null;
+        const recommendedModel = pickRecommendedModel(models);
         return {
           connected: true,
           transport: 'proxy',
