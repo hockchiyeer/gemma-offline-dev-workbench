@@ -3,6 +3,7 @@ import {
   BookOpen,
   Code2,
   Cpu,
+  GitBranch,
   MessageSquarePlus,
   Paperclip,
   RefreshCw,
@@ -18,6 +19,7 @@ import {
   streamLocalGemmaChat,
   type ProbeResult,
 } from '../lib/gemmaClient';
+import { inferActionKindFromPrompt } from '../lib/snippetLineage';
 import type {
   ChatAttachmentRef,
   ChatMessage,
@@ -25,6 +27,8 @@ import type {
   CodeSnippet,
   DocPage,
   LocalRuntimeConfig,
+  SavedSnippetRef,
+  SnippetActionKind,
   SupportedLanguage,
 } from '../types/vault';
 import { useConfirm } from './ConfirmDialog';
@@ -44,8 +48,25 @@ interface GemmaAssistantPaneProps {
   probing: boolean;
   onRescanRuntime: () => Promise<void>;
   onOpenRuntimeModal: () => void;
-  onSaveSnippetFromCode: (code: string, language: SupportedLanguage) => Promise<void>;
-  queuedPrompt?: { prompt: string; attachments: ChatAttachmentRef[] } | null;
+  onSaveSnippetFromCode: (
+    code: string,
+    language: SupportedLanguage,
+    parentSnippetId?: string,
+    actionKind?: SnippetActionKind
+  ) => Promise<void>;
+  onSaveGeneratedSnippets: (input: {
+    parentSnippetId: string;
+    actionKind: SnippetActionKind;
+    prompt: string;
+    model?: string;
+    assistantMarkdown: string;
+  }) => Promise<SavedSnippetRef[]>;
+  onOpenSnippet?: (snippetId: string) => void;
+  queuedPrompt?: {
+    prompt: string;
+    attachments: ChatAttachmentRef[];
+    actionKind?: SnippetActionKind;
+  } | null;
   onClearQueuedPrompt: () => void;
 }
 
@@ -87,12 +108,17 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   onRescanRuntime,
   onOpenRuntimeModal,
   onSaveSnippetFromCode,
+  onSaveGeneratedSnippets,
+  onOpenSnippet,
   queuedPrompt,
   onClearQueuedPrompt,
 }) => {
   const confirm = useConfirm();
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<ChatAttachmentRef[]>([]);
+  const [pendingActionKind, setPendingActionKind] = useState<SnippetActionKind | undefined>(
+    undefined
+  );
   const [showAttachDrawer, setShowAttachDrawer] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [streamingDraft, setStreamingDraft] = useState<{ msgId: string; text: string } | null>(
@@ -139,6 +165,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     if (queuedPrompt) {
       setInput(queuedPrompt.prompt);
       setAttachments(queuedPrompt.attachments);
+      setPendingActionKind(queuedPrompt.actionKind);
       onClearQueuedPrompt();
     }
   }, [queuedPrompt, onClearQueuedPrompt]);
@@ -146,8 +173,13 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   const toggleAttachment = (ref: ChatAttachmentRef) => {
     setAttachments((prev) => {
       const exists = prev.some((a) => a.kind === ref.kind && a.id === ref.id);
-      if (exists) return prev.filter((a) => !(a.kind === ref.kind && a.id === ref.id));
-      return [...prev, ref];
+      const next = exists
+        ? prev.filter((a) => !(a.kind === ref.kind && a.id === ref.id))
+        : [...prev, ref];
+      if (!next.some((a) => a.kind === 'snippet')) {
+        setPendingActionKind(undefined);
+      }
+      return next;
     });
   };
 
@@ -196,12 +228,19 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     setStreamError(null);
     setContextTrimmed(false);
     const now = Date.now();
+    const usedAttachments = [...attachments];
+    const primarySnippetAttachment = usedAttachments.find((a) => a.kind === 'snippet');
+    const resolvedActionKind = primarySnippetAttachment
+      ? inferActionKindFromPrompt(text, pendingActionKind)
+      : undefined;
+
     const userMsg: ChatMessage = {
       id: `msg-${crypto.randomUUID()}`,
       role: 'user',
       content: text,
       createdAt: now,
-      attachments: attachments.length > 0 ? [...attachments] : undefined,
+      attachments: usedAttachments.length > 0 ? usedAttachments : undefined,
+      actionKind: resolvedActionKind,
     };
 
     const assistantMsgId = `msg-${crypto.randomUUID()}`;
@@ -229,8 +268,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     // Persist the user message once up front; stream tokens in-memory to avoid IDB/AES thrashing.
     await onUpdateSession(baseSession, { immediate: true });
     if (!customPrompt) setInput('');
-    const usedAttachments = [...attachments];
     setAttachments([]);
+    setPendingActionKind(undefined);
     setShowAttachDrawer(false);
 
     const controller = new AbortController();
@@ -275,6 +314,17 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
 
       const elapsed = Math.round(performance.now() - startedAt);
       const savedThinking = latestThinkingRef.current.trim() || undefined;
+      const savedSnippets =
+        primarySnippetAttachment && finalText.trim()
+          ? await onSaveGeneratedSnippets({
+              parentSnippetId: primarySnippetAttachment.id,
+              actionKind: resolvedActionKind || 'chat',
+              prompt: text,
+              model: runtimeConfig.selectedModel,
+              assistantMarkdown: finalText,
+            })
+          : [];
+
       const completedSession: ChatSession = {
         ...baseSession,
         messages: baseSession.messages.map((m) =>
@@ -284,6 +334,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                 content: finalText || 'Empty response returned by local Gemma model.',
                 thinking: savedThinking,
                 durationMs: elapsed,
+                savedSnippets: savedSnippets.length > 0 ? savedSnippets : undefined,
               }
             : m
         ),
@@ -465,10 +516,18 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             </div>
           )}
 
-          {activeSession?.messages.map((msg) => {
+          {activeSession?.messages.map((msg, msgIndex) => {
             const isStreamingThis = streamingDraft && streamingDraft.msgId === msg.id;
             const displayContent = isStreamingThis ? streamingDraft.text : msg.content;
             const displayThinking = isStreamingThis ? thinkingText : msg.thinking || '';
+            const precedingUser =
+              msg.role === 'assistant' && msgIndex > 0
+                ? activeSession.messages[msgIndex - 1]
+                : undefined;
+            const turnParentSnippetId = precedingUser?.attachments?.find(
+              (a) => a.kind === 'snippet'
+            )?.id;
+            const turnActionKind = precedingUser?.actionKind;
 
             return (
               <article
@@ -518,8 +577,38 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                     )}
                     <MarkdownRenderer
                       content={displayContent}
-                      onSaveSnippet={onSaveSnippetFromCode}
+                      onSaveSnippet={(code, language) =>
+                        void onSaveSnippetFromCode(
+                          code,
+                          language,
+                          turnParentSnippetId,
+                          turnActionKind
+                        )
+                      }
                     />
+                    {msg.savedSnippets && msg.savedSnippets.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-2 border-t border-slate-200/80 pt-2.5 text-xs text-slate-600 dark:border-slate-800/80 dark:text-slate-400">
+                        <span className="inline-flex items-center gap-1 font-medium text-teal-700 dark:text-teal-400">
+                          <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
+                          Saved to Snippets
+                          {msg.savedSnippets[0]?.parentTitle
+                            ? ` under "${msg.savedSnippets[0].parentTitle}"`
+                            : ''}
+                          :
+                        </span>
+                        {msg.savedSnippets.map((savedRef) => (
+                          <button
+                            key={savedRef.id}
+                            type="button"
+                            onClick={() => onOpenSnippet?.(savedRef.id)}
+                            className="max-w-full truncate rounded-md border border-teal-600/30 bg-teal-500/10 px-2 py-1 font-mono text-[11px] font-medium text-teal-800 hover:bg-teal-500/20 dark:text-teal-300"
+                            title={`Open ${savedRef.title} in Snippets`}
+                          >
+                            {savedRef.title}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : isStreamingThis ? (
                   <div className="space-y-2 font-mono text-xs text-slate-500 dark:text-slate-400">
@@ -682,7 +771,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                   handleSend();
                 }
               }}
-              placeholder="Ask local Gemma to write, debug, refactor, or explain code..."
+              placeholder="Ask your local Gemma model to write, debug, refactor, explain, expand, and test code..."
               className="max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-teal-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
             />
 

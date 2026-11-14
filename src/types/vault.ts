@@ -27,9 +27,23 @@ export interface Project {
   updatedAt: number;
 }
 
+export type SnippetActionKind =
+  | 'explain'
+  | 'debug'
+  | 'refactor'
+  | 'expand'
+  | 'unit-tests'
+  | 'chat';
+
 export interface CodeSnippet {
   id: string;
   projectId: string;
+  /** Optional parent snippet ID when derived from an existing snippet. */
+  parentId?: string;
+  /** AI action or origin that created this derived snippet. */
+  derivedAction?: SnippetActionKind;
+  /** Tree depth / revision number (root = 1, child = 2, grandchild = 3...). */
+  version?: number;
   title: string;
   language: SupportedLanguage;
   code: string;
@@ -59,6 +73,13 @@ export interface ChatAttachmentRef {
   title: string;
 }
 
+export interface SavedSnippetRef {
+  id: string;
+  title: string;
+  parentId?: string;
+  parentTitle?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -68,6 +89,8 @@ export interface ChatMessage {
   createdAt: number;
   durationMs?: number;
   attachments?: ChatAttachmentRef[];
+  actionKind?: SnippetActionKind;
+  savedSnippets?: SavedSnippetRef[];
 }
 
 export interface ChatSession {

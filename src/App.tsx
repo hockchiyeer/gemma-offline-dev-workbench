@@ -51,6 +51,10 @@ import {
   type WebGPUStatus,
 } from './lib/gemmaClient';
 import { createSaveQueue } from './lib/saveQueue';
+import {
+  createChildSnippets,
+  extractFencedCodeBlocks,
+} from './lib/snippetLineage';
 import type {
   ChatAttachmentRef,
   ChatSession,
@@ -58,6 +62,8 @@ import type {
   DocPage,
   LocalRuntimeConfig,
   Project,
+  SavedSnippetRef,
+  SnippetActionKind,
   SupportedLanguage,
   VaultBackupBundle,
   WorkspaceTab,
@@ -79,9 +85,12 @@ function AppShell() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('assistant');
   const [activeProjectId, setActiveProjectId] = useState<string>('all');
   const [activeSessionId, setActiveSessionId] = useState<string>('');
+  const [selectedSnippetId, setSelectedSnippetId] = useState<string | null>(null);
+  const [snippetOpenNonce, setSnippetOpenNonce] = useState(0);
   const [queuedPrompt, setQueuedPrompt] = useState<{
     prompt: string;
     attachments: ChatAttachmentRef[];
+    actionKind?: SnippetActionKind;
   } | null>(null);
 
   const [probe, setProbe] = useState<ProbeResult>({
@@ -198,6 +207,7 @@ function AppShell() {
           if (!mounted) return;
           setWorkspace(data);
           setActiveSessionId(data.sessions[0]?.id || '');
+          setSelectedSnippetId(data.snippets[0]?.id || null);
           const probeRes = await probeLocalGemmaRuntime(data.runtimeConfig);
           if (mounted) setProbe(probeRes);
         }
@@ -277,6 +287,7 @@ function AppShell() {
     setCryptoKey(res.key);
     setWorkspace(data);
     setActiveSessionId(data.sessions[0]?.id || '');
+    setSelectedSnippetId(data.snippets[0]?.id || null);
     setLocked(false);
     lastActivityRef.current = Date.now();
     probeLocalGemmaRuntime(data.runtimeConfig).then(setProbe);
@@ -303,14 +314,66 @@ function AppShell() {
   };
 
   const handleDeleteSnippet = async (id: string) => {
-    setWorkspace((prev) =>
-      prev ? { ...prev, snippets: prev.snippets.filter((s) => s.id !== id) } : prev
-    );
+    const deleted = workspaceRef.current?.snippets.find((s) => s.id === id);
+    const rehomedChildren: CodeSnippet[] = [];
+
+    setWorkspace((prev) => {
+      if (!prev) return prev;
+      const nextSnippets = prev.snippets
+        .filter((s) => s.id !== id)
+        .map((s) => {
+          if (s.parentId === id) {
+            const updatedChild: CodeSnippet = {
+              ...s,
+              parentId: deleted?.parentId,
+              updatedAt: Date.now(),
+            };
+            rehomedChildren.push(updatedChild);
+            return updatedChild;
+          }
+          return s;
+        });
+      return { ...prev, snippets: nextSnippets };
+    });
+
     await saveQueueRef.current.now(`snip:${id}`, () => removeSnippet(id));
+    for (const child of rehomedChildren) {
+      await saveQueueRef.current.now(`snip:${child.id}`, () =>
+        saveSnippet(child, cryptoKeyRef.current)
+      );
+    }
     showToast('Snippet removed from local database');
   };
 
-  const handleSaveSnippetFromCode = async (code: string, language: SupportedLanguage) => {
+  const handleSaveSnippetFromCode = async (
+    code: string,
+    language: SupportedLanguage,
+    parentSnippetId?: string,
+    actionKind?: SnippetActionKind
+  ) => {
+    const current = workspaceRef.current;
+    const parent = parentSnippetId
+      ? current?.snippets.find((s) => s.id === parentSnippetId)
+      : undefined;
+
+    if (parent) {
+      const [child] = createChildSnippets({
+        parent,
+        blocks: [{ code, language, rawLanguage: language }],
+        actionKind: actionKind || 'chat',
+        prompt: 'Saved code block from Gemma AI response',
+        model: current?.runtimeConfig.selectedModel,
+      });
+      setWorkspace((prev) =>
+        prev ? { ...prev, snippets: [...prev.snippets, child] } : prev
+      );
+      await saveQueueRef.current.now(`snip:${child.id}`, () =>
+        saveSnippet(child, cryptoKeyRef.current)
+      );
+      showToast(`Saved child snippet under "${parent.title}"`);
+      return;
+    }
+
     const now = Date.now();
     const targetProject =
       activeProjectId !== 'all'
@@ -326,6 +389,7 @@ function AppShell() {
     const snippet: CodeSnippet = {
       id: `snip-${crypto.randomUUID()}`,
       projectId: targetProject,
+      version: 1,
       title: `${language.toUpperCase()} · ${firstLine}`,
       language,
       code,
@@ -343,6 +407,58 @@ function AppShell() {
     );
     showToast('Saved code block to Snippets');
   };
+
+  const handleSaveGeneratedSnippets = useCallback(
+    async (input: {
+      parentSnippetId: string;
+      actionKind: SnippetActionKind;
+      prompt: string;
+      model?: string;
+      assistantMarkdown: string;
+    }): Promise<SavedSnippetRef[]> => {
+      const current = workspaceRef.current;
+      if (!current) return [];
+      const parent = current.snippets.find((s) => s.id === input.parentSnippetId);
+      if (!parent) return [];
+
+      const blocks = extractFencedCodeBlocks(input.assistantMarkdown);
+      if (blocks.length === 0) return [];
+
+      const created = createChildSnippets({
+        parent,
+        blocks,
+        actionKind: input.actionKind,
+        prompt: input.prompt,
+        model: input.model,
+      });
+
+      setWorkspace((prev) =>
+        prev ? { ...prev, snippets: [...prev.snippets, ...created] } : prev
+      );
+
+      await Promise.all(
+        created.map((child) =>
+          saveQueueRef.current.now(`snip:${child.id}`, () =>
+            saveSnippet(child, cryptoKeyRef.current)
+          )
+        )
+      );
+
+      showToastRef.current(
+        created.length === 1
+          ? `Saved child snippet under "${parent.title}"`
+          : `Saved ${created.length} child snippets under "${parent.title}"`
+      );
+
+      return created.map((child) => ({
+        id: child.id,
+        title: child.title,
+        parentId: parent.id,
+        parentTitle: parent.title,
+      }));
+    },
+    []
+  );
 
   const handleSaveDoc = (doc: DocPage) => {
     setWorkspace((prev) => {
@@ -433,12 +549,23 @@ function AppShell() {
     await saveQueueRef.current.now(`chat:${id}`, () => removeChatSession(id));
   };
 
-  const handleSendToGemma = (snippet: CodeSnippet, actionPrompt: string) => {
+  const handleSendToGemma = (
+    snippet: CodeSnippet,
+    actionPrompt: string,
+    actionKind?: SnippetActionKind
+  ) => {
     setQueuedPrompt({
       prompt: actionPrompt,
       attachments: [{ kind: 'snippet', id: snippet.id, title: snippet.title }],
+      actionKind,
     });
     setActiveTab('assistant');
+  };
+
+  const handleOpenSnippet = (snippetId: string) => {
+    setSelectedSnippetId(snippetId);
+    setActiveTab('snippets');
+    setSnippetOpenNonce((n) => n + 1);
   };
 
   const handleSendDocToGemma = (doc: DocPage, actionPrompt: string) => {
@@ -515,6 +642,7 @@ function AppShell() {
     channelRef.current?.postMessage('security-changed');
     setWorkspace(restored);
     setActiveSessionId(restored.sessions[0]?.id || '');
+    setSelectedSnippetId(restored.snippets[0]?.id || null);
     setActiveProjectId('all');
   };
 
@@ -701,9 +829,11 @@ function AppShell() {
                   activeProjectId !== 'all'
                     ? activeProjectId
                     : workspace.projects[0]?.id || 'proj-core';
+                const newId = `snip-${crypto.randomUUID()}`;
                 handleSaveSnippet({
-                  id: `snip-${crypto.randomUUID()}`,
+                  id: newId,
                   projectId: targetProj,
+                  version: 1,
                   title: 'New Code Snippet',
                   language: 'typescript',
                   code: '// Start coding offline\n',
@@ -713,6 +843,8 @@ function AppShell() {
                   createdAt: now,
                   updatedAt: now,
                 });
+                setSelectedSnippetId(newId);
+                setSnippetOpenNonce((n) => n + 1);
               }}
               className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-teal-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-500 whitespace-nowrap shrink-0"
             >
@@ -861,6 +993,8 @@ function AppShell() {
                 onRescanRuntime={() => runRuntimeProbe()}
                 onOpenRuntimeModal={() => setRuntimeModalOpen(true)}
                 onSaveSnippetFromCode={handleSaveSnippetFromCode}
+                onSaveGeneratedSnippets={handleSaveGeneratedSnippets}
+                onOpenSnippet={handleOpenSnippet}
                 queuedPrompt={queuedPrompt}
                 onClearQueuedPrompt={() => setQueuedPrompt(null)}
               />
@@ -871,6 +1005,9 @@ function AppShell() {
                 snippets={workspace.snippets}
                 projects={workspace.projects}
                 activeProjectId={activeProjectId}
+                selectedSnippetId={selectedSnippetId}
+                onSelectSnippet={setSelectedSnippetId}
+                mobileOpenNonce={snippetOpenNonce}
                 onSaveSnippet={handleSaveSnippet}
                 onDeleteSnippet={handleDeleteSnippet}
                 onSendToGemma={handleSendToGemma}

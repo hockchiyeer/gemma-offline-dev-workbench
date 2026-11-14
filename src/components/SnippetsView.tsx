@@ -6,8 +6,10 @@ import {
   ChevronUp,
   Code2,
   Copy,
+  CornerDownRight,
   Download,
   Eye,
+  GitBranch,
   Pencil,
   Plus,
   Search,
@@ -16,8 +18,17 @@ import {
   Star,
   Trash2,
 } from 'lucide-react';
+import {
+  buildSnippetTree,
+  formatActionLabel,
+} from '../lib/snippetLineage';
 import { analyzeCodeLocally, SUPPORTED_LANGUAGES } from '../lib/syntax';
-import type { CodeSnippet, Project, SupportedLanguage } from '../types/vault';
+import type {
+  CodeSnippet,
+  Project,
+  SnippetActionKind,
+  SupportedLanguage,
+} from '../types/vault';
 import { CodeBlock } from './CodeBlock';
 import { useConfirm } from './ConfirmDialog';
 
@@ -25,9 +36,16 @@ interface SnippetsViewProps {
   snippets: CodeSnippet[];
   projects: Project[];
   activeProjectId: string;
+  selectedSnippetId?: string | null;
+  onSelectSnippet?: (id: string | null) => void;
+  mobileOpenNonce?: number;
   onSaveSnippet: (snippet: CodeSnippet) => void | Promise<void>;
   onDeleteSnippet: (id: string) => Promise<void>;
-  onSendToGemma: (snippet: CodeSnippet, actionPrompt: string) => void;
+  onSendToGemma: (
+    snippet: CodeSnippet,
+    actionPrompt: string,
+    actionKind?: SnippetActionKind
+  ) => void;
   onMobileDetailChange?: (active: boolean) => void;
 }
 
@@ -35,6 +53,9 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
   snippets,
   projects,
   activeProjectId,
+  selectedSnippetId,
+  onSelectSnippet,
+  mobileOpenNonce,
   onSaveSnippet,
   onDeleteSnippet,
   onSendToGemma,
@@ -44,12 +65,26 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
   const [search, setSearch] = useState('');
   const [langFilter, setLangFilter] = useState<'all' | SupportedLanguage>('all');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(snippets[0]?.id || null);
+  const [internalSelectedId, setInternalSelectedId] = useState<string | null>(
+    snippets[0]?.id || null
+  );
+  const resolvedSelectedId =
+    selectedSnippetId !== undefined ? selectedSnippetId : internalSelectedId;
+  const setSelectedId = (id: string | null) => {
+    setInternalSelectedId(id);
+    onSelectSnippet?.(id);
+  };
   const [mobileEditing, setMobileEditing] = useState(false);
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'edit' | 'preview'>('edit');
   const [copied, setCopied] = useState(false);
   const [tagInput, setTagInput] = useState('');
+
+  useEffect(() => {
+    if (mobileOpenNonce && mobileOpenNonce > 0) {
+      setMobileEditing(true);
+    }
+  }, [mobileOpenNonce]);
 
   useEffect(() => {
     onMobileDetailChange?.(mobileEditing);
@@ -72,14 +107,35 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
     });
   }, [snippets, activeProjectId, langFilter, favoritesOnly, search]);
 
+  const snippetTree = useMemo(
+    () => buildSnippetTree(filteredSnippets, snippets),
+    [filteredSnippets, snippets]
+  );
+
   const activeSnippet = useMemo(
     () =>
-      filteredSnippets.find((s) => s.id === selectedId) ||
-      snippets.find((s) => s.id === selectedId) ||
+      filteredSnippets.find((s) => s.id === resolvedSelectedId) ||
+      snippets.find((s) => s.id === resolvedSelectedId) ||
+      snippetTree[0]?.snippet ||
       filteredSnippets[0] ||
       null,
-    [filteredSnippets, snippets, selectedId]
+    [filteredSnippets, snippets, snippetTree, resolvedSelectedId]
   );
+
+  const parentSnippet = useMemo(
+    () =>
+      activeSnippet?.parentId
+        ? snippets.find((s) => s.id === activeSnippet.parentId) || null
+        : null,
+    [snippets, activeSnippet]
+  );
+
+  const derivedChildren = useMemo(() => {
+    if (!activeSnippet) return [];
+    return snippets
+      .filter((s) => s.parentId === activeSnippet.id)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }, [snippets, activeSnippet]);
 
   const metrics = useMemo(
     () => (activeSnippet ? analyzeCodeLocally(activeSnippet.code) : null),
@@ -93,6 +149,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
     const created: CodeSnippet = {
       id: `snip-${crypto.randomUUID()}`,
       projectId: targetProject,
+      version: 1,
       title: 'Untitled Code Snippet',
       language: 'typescript',
       code: '// Write or paste code here\n',
@@ -127,9 +184,12 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
     });
     if (!accepted) return;
     const idToDelete = activeSnippet.id;
+    const fallbackNextId = activeSnippet.parentId || null;
     await onDeleteSnippet(idToDelete);
-    setSelectedId(null);
-    setMobileEditing(false);
+    setSelectedId(fallbackNextId);
+    if (!fallbackNextId) {
+      setMobileEditing(false);
+    }
   };
 
   const handleAddTag = (e: React.FormEvent) => {
@@ -239,7 +299,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
         </div>
 
         <div className="flex-1 overflow-y-auto divide-y divide-slate-200/80 dark:divide-slate-800/80">
-          {filteredSnippets.length === 0 ? (
+          {snippetTree.length === 0 ? (
             <div className="p-6 text-center">
               <Code2 className="mx-auto h-8 w-8 text-slate-400" />
               <p className="mt-2 text-sm font-medium text-slate-700 dark:text-slate-300">
@@ -258,9 +318,11 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
               </button>
             </div>
           ) : (
-            filteredSnippets.map((item) => {
+            snippetTree.map(({ snippet: item, depth, childCount, parentTitle }) => {
               const isSelected = activeSnippet?.id === item.id;
               const lineCount = item.code.split('\n').length;
+              const cappedDepth = Math.min(depth, 4);
+              const paddingLeftPx = cappedDepth > 0 ? 16 + cappedDepth * 14 : 16;
               return (
                 <button
                   key={item.id}
@@ -269,29 +331,65 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                     setSelectedId(item.id);
                     setMobileEditing(true);
                   }}
-                  className={`block w-full px-4 py-3.5 text-left transition-colors ${
+                  style={cappedDepth > 0 ? { paddingLeft: `${paddingLeftPx}px` } : undefined}
+                  className={`relative block w-full py-3 pr-4 pl-4 text-left transition-colors ${
                     isSelected
                       ? 'bg-teal-50/70 dark:bg-teal-950/25'
                       : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
                   }`}
                 >
+                  {cappedDepth > 0 && (
+                    <span
+                      aria-hidden="true"
+                      style={{ left: `${paddingLeftPx - 10}px` }}
+                      className="absolute top-0 bottom-0 w-px bg-slate-200 dark:bg-slate-800"
+                    />
+                  )}
                   <div className="flex items-start justify-between gap-2">
-                    <span className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
-                      {item.title}
+                    <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-slate-900 dark:text-slate-100">
+                      {depth > 0 && (
+                        <CornerDownRight
+                          className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <span className="truncate">{item.title}</span>
                     </span>
                     {item.favorite && (
                       <Star className="h-3.5 w-3.5 shrink-0 fill-amber-500 text-amber-500" />
                     )}
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                    {(item.version || item.derivedAction) && (
+                      <>
+                        <span className="font-mono text-slate-700 dark:text-slate-300">
+                          v{item.version ?? 1}
+                          {item.derivedAction ? ` · ${formatActionLabel(item.derivedAction)}` : ''}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                      </>
+                    )}
                     <span className="font-mono text-teal-700 dark:text-teal-400">
                       {item.language}
                     </span>
                     <span aria-hidden="true">·</span>
                     <span className="tabular-nums">{lineCount} lines</span>
+                    {childCount > 0 && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="tabular-nums text-teal-700 dark:text-teal-400">
+                          {childCount} {childCount === 1 ? 'child' : 'children'}
+                        </span>
+                      </>
+                    )}
                     <span aria-hidden="true">·</span>
                     <span>{formatTime(item.updatedAt)}</span>
                   </div>
+                  {depth === 0 && parentTitle && (
+                    <div className="mt-1 truncate text-[11px] text-slate-500 dark:text-slate-400">
+                      from {parentTitle}
+                    </div>
+                  )}
                 </button>
               );
             })
@@ -322,6 +420,8 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                   value={activeSnippet.title}
                   onChange={(e) => handleUpdate({ title: e.target.value })}
                   aria-label="Snippet title"
+                  title="Click to modify code snippet name"
+                  placeholder="Untitled Code Snippet"
                   className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-900 outline-none focus:underline sm:text-base dark:text-white"
                 />
               </div>
@@ -365,25 +465,29 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                     <button
                       type="button"
                       onClick={() => setViewMode('edit')}
+                      title="Enable modification of code snippet's name and code"
+                      aria-label="Edit — enable modification of code snippet's name and code"
                       className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-md px-2 sm:px-2.5 text-xs font-medium whitespace-nowrap ${
                         viewMode === 'edit'
                           ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
                           : 'text-slate-600 dark:text-slate-400'
                       }`}
                     >
-                      <Pencil className="h-3.5 w-3.5" />
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
                       Edit
                     </button>
                     <button
                       type="button"
                       onClick={() => setViewMode('preview')}
+                      title="View syntax-highlighted code preview"
+                      aria-label="Highlight — view syntax-highlighted code preview"
                       className={`inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1.5 rounded-md px-2 sm:px-2.5 text-xs font-medium whitespace-nowrap ${
                         viewMode === 'preview'
                           ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-white'
                           : 'text-slate-600 dark:text-slate-400'
                       }`}
                     >
-                      <Eye className="h-3.5 w-3.5" />
+                      <Eye className="h-3.5 w-3.5" aria-hidden="true" />
                       Highlight
                     </button>
                   </div>
@@ -471,23 +575,89 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
 
               <div className="flex flex-wrap items-center gap-1.5">
                 {[
-                  { label: 'Explain', prompt: 'Explain how this snippet works step-by-step and note any edge cases.' },
-                  { label: 'Debug', prompt: 'Audit this snippet for potential bugs, race conditions, or security flaws and provide a fixed version.' },
-                  { label: 'Refactor', prompt: 'Refactor this snippet for clarity, modularity, and idiomatic best practices.' },
-                  { label: 'Unit Tests', prompt: 'Write comprehensive unit tests covering normal cases and boundary conditions for this code.' },
+                  {
+                    kind: 'explain' as SnippetActionKind,
+                    label: 'Explain',
+                    title: 'Explain how this snippet works step-by-step',
+                    prompt: 'Explain how this snippet works step-by-step and note any edge cases.',
+                  },
+                  {
+                    kind: 'debug' as SnippetActionKind,
+                    label: 'Debug',
+                    title: 'Audit for bugs, race conditions, or security issues',
+                    prompt: 'Audit this snippet for potential bugs, race conditions, or security flaws and provide a fixed version.',
+                  },
+                  {
+                    kind: 'refactor' as SnippetActionKind,
+                    label: 'Refactor',
+                    title: 'Refactor for clarity and best practices',
+                    prompt: 'Refactor this snippet for clarity, modularity, and idiomatic best practices.',
+                  },
+                  {
+                    kind: 'expand' as SnippetActionKind,
+                    label: 'Expand',
+                    title: 'Implement new features, finish stubs, or expand code from comments and templates',
+                    prompt: 'Implement or expand this snippet based on any comments, TODOs, or starter template. Complete unfinished logic into clean, idiomatic code with sensible edge-case handling.',
+                  },
+                  {
+                    kind: 'unit-tests' as SnippetActionKind,
+                    label: 'Unit Tests',
+                    title: 'Generate unit tests for normal and edge cases',
+                    prompt: 'Write comprehensive unit tests covering normal cases and boundary conditions for this code.',
+                  },
                 ].map((action) => (
                   <button
                     key={action.label}
                     type="button"
-                    onClick={() => onSendToGemma(activeSnippet, action.prompt)}
+                    onClick={() => onSendToGemma(activeSnippet, action.prompt, action.kind)}
+                    title={action.title}
                     className="inline-flex min-h-[40px] lg:min-h-[34px] pointer-coarse:min-h-[40px] items-center gap-1 rounded-lg border border-teal-600/30 bg-teal-500/10 px-2.5 text-xs font-medium text-teal-700 transition-colors hover:bg-teal-500/20 whitespace-nowrap shrink-0 dark:text-teal-300"
                   >
-                    <Sparkles className="h-3 w-3" />
+                    <Sparkles className="h-3 w-3" aria-hidden="true" />
                     {action.label}
                   </button>
                 ))}
               </div>
             </div>
+
+            {(parentSnippet || derivedChildren.length > 0) && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 bg-white/40 px-3 py-1.5 text-xs text-slate-600 sm:px-4 dark:border-slate-800 dark:bg-slate-900/20 dark:text-slate-400">
+                <span className="inline-flex items-center gap-1 font-mono text-slate-700 dark:text-slate-300">
+                  <GitBranch className="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" aria-hidden="true" />
+                  v{activeSnippet.version ?? 1}
+                  {activeSnippet.derivedAction
+                    ? ` · ${formatActionLabel(activeSnippet.derivedAction)}`
+                    : ''}
+                </span>
+                {parentSnippet && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedId(parentSnippet.id)}
+                    className="truncate font-medium text-teal-700 hover:underline dark:text-teal-400"
+                  >
+                    Parent: {parentSnippet.title}
+                  </button>
+                )}
+                {derivedChildren.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-slate-500 dark:text-slate-400">
+                      Derived ({derivedChildren.length}):
+                    </span>
+                    {derivedChildren.map((child) => (
+                      <button
+                        key={child.id}
+                        type="button"
+                        onClick={() => setSelectedId(child.id)}
+                        className="max-w-[200px] truncate rounded border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[11px] text-slate-700 hover:border-teal-600/40 hover:text-teal-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:text-teal-300"
+                        title={child.title}
+                      >
+                        {child.title}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 sm:space-y-4">
               {viewMode === 'edit' ? (
