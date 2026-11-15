@@ -3,6 +3,7 @@ import {
   BookOpen,
   Code2,
   Cpu,
+  ExternalLink,
   GitBranch,
   MessageSquarePlus,
   Paperclip,
@@ -718,11 +719,54 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
 
                 {msg.attachments && msg.attachments.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-teal-700 dark:text-teal-400">
-                    {msg.attachments.map((att) => (
-                      <span key={`${att.kind}-${att.id}`} className="font-mono">
-                        @{att.kind}:{att.title}
-                      </span>
-                    ))}
+                    {msg.attachments.map((att) => {
+                      if (att.kind === 'snippet') {
+                        const liveSnippet = snippets.find((s) => s.id === att.id);
+                        if (liveSnippet && onOpenSnippet) {
+                          const displayTitle = liveSnippet.title || att.title;
+                          const tooltip =
+                            liveSnippet.title !== att.title
+                              ? `Open "${liveSnippet.title}" in Snippets (attached as "${att.title}")`
+                              : `Open "${displayTitle}" in Snippets`;
+                          return (
+                            <button
+                              key={`${att.kind}-${att.id}`}
+                              type="button"
+                              onClick={() => onOpenSnippet(att.id)}
+                              title={tooltip}
+                              aria-label={`Open snippet ${displayTitle} in Snippets tab`}
+                              className="inline-flex max-w-full cursor-pointer items-center gap-1 rounded-sm text-left font-mono underline decoration-teal-600/50 underline-offset-2 transition-colors hover:text-teal-800 hover:decoration-teal-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 dark:decoration-teal-400/50 dark:hover:text-teal-300 dark:hover:decoration-teal-300"
+                            >
+                              <span className="truncate">
+                                @{att.kind}:{displayTitle}
+                              </span>
+                              <ExternalLink className="h-3 w-3 shrink-0 opacity-75" aria-hidden="true" />
+                            </button>
+                          );
+                        }
+                        return (
+                          <span
+                            key={`${att.kind}-${att.id}`}
+                            className="inline-flex max-w-full items-center gap-1 font-mono text-slate-500 dark:text-slate-400"
+                            title={
+                              liveSnippet
+                                ? `Source snippet: ${liveSnippet.title}`
+                                : 'This snippet was deleted from the vault'
+                            }
+                          >
+                            <span className="truncate">
+                              @{att.kind}:{att.title}
+                            </span>
+                            {!liveSnippet && <span className="text-[10px]">(deleted)</span>}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span key={`${att.kind}-${att.id}`} className="font-mono">
+                          @{att.kind}:{att.title}
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
 

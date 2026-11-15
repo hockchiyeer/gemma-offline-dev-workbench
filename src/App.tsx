@@ -561,6 +561,14 @@ function AppShell() {
   };
 
   const handleOpenSnippet = (snippetId: string) => {
+    const target = workspaceRef.current?.snippets.find((s) => s.id === snippetId);
+    if (!target) {
+      showToast('This snippet is no longer in the vault.');
+      return;
+    }
+    if (activeProjectId !== 'all' && target.projectId !== activeProjectId) {
+      setActiveProjectId('all');
+    }
     setSelectedSnippetId(snippetId);
     setActiveTab('snippets');
     setSnippetOpenNonce((n) => n + 1);
