@@ -1,6 +1,8 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
+  ChevronDown,
+  ChevronUp,
   Code2,
   Cpu,
   ExternalLink,
@@ -23,7 +25,11 @@ import {
 import { compactConversation } from '../lib/compaction';
 import { inputBudgetTokens, planCompaction } from '../lib/contextEngine';
 import { estimateMessagesTokens, estimateTokens, getCalibration, recordCalibrationSample } from '../lib/tokenEstimate';
-import { inferActionKindFromPrompt, shouldAutoSaveChildSnippets } from '../lib/snippetLineage';
+import {
+  extractSnippetSnapshotFromSentContext,
+  inferActionKindFromPrompt,
+  shouldAutoSaveChildSnippets,
+} from '../lib/snippetLineage';
 import type {
   ChatAttachmentRef,
   ChatMessage,
@@ -36,6 +42,7 @@ import type {
   SnippetActionKind,
   SupportedLanguage,
 } from '../types/vault';
+import { CodeBlock } from './CodeBlock';
 import { ContextBar } from './ContextBar';
 import { useConfirm } from './ConfirmDialog';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -138,6 +145,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   const [waitSeconds, setWaitSeconds] = useState(0);
   const [contextTrimmed, setContextTrimmed] = useState(false);
   const [compacting, setCompacting] = useState(false);
+  const [expandedAttachmentKeys, setExpandedAttachmentKeys] = useState<Record<string, boolean>>({});
   const [streamError, setStreamError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const latestDraftRef = useRef<string>('');
@@ -179,6 +187,13 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       onClearQueuedPrompt();
     }
   }, [queuedPrompt, onClearQueuedPrompt]);
+
+  const toggleAttachmentPreview = (key: string) => {
+    setExpandedAttachmentKeys((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
 
   const toggleAttachment = (ref: ChatAttachmentRef) => {
     setAttachments((prev) => {
@@ -717,58 +732,258 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                   </span>
                 </div>
 
-                {msg.attachments && msg.attachments.length > 0 && (
-                  <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-teal-700 dark:text-teal-400">
-                    {msg.attachments.map((att) => {
-                      if (att.kind === 'snippet') {
-                        const liveSnippet = snippets.find((s) => s.id === att.id);
-                        if (liveSnippet && onOpenSnippet) {
-                          const displayTitle = liveSnippet.title || att.title;
-                          const tooltip =
-                            liveSnippet.title !== att.title
-                              ? `Open "${liveSnippet.title}" in Snippets (attached as "${att.title}")`
-                              : `Open "${displayTitle}" in Snippets`;
-                          return (
-                            <button
-                              key={`${att.kind}-${att.id}`}
-                              type="button"
-                              onClick={() => onOpenSnippet(att.id)}
-                              title={tooltip}
-                              aria-label={`Open snippet ${displayTitle} in Snippets tab`}
-                              className="inline-flex max-w-full cursor-pointer items-center gap-1 rounded-sm text-left font-mono underline decoration-teal-600/50 underline-offset-2 transition-colors hover:text-teal-800 hover:decoration-teal-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 dark:decoration-teal-400/50 dark:hover:text-teal-300 dark:hover:decoration-teal-300"
-                            >
-                              <span className="truncate">
-                                @{att.kind}:{displayTitle}
+                {msg.attachments && msg.attachments.length > 0 && (() => {
+                  const expandedPreviews: Array<{
+                    key: string;
+                    snippetId: string;
+                    title: string;
+                    language: SupportedLanguage;
+                    code: string;
+                    version?: number;
+                    deleted: boolean;
+                    truncated?: boolean;
+                  }> = [];
+
+                  return (
+                    <div className="mb-2.5 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        {msg.attachments.map((att) => {
+                          if (att.kind !== 'snippet') {
+                            return (
+                              <span
+                                key={`${att.kind}-${att.id}`}
+                                className="font-mono text-teal-700 dark:text-teal-400"
+                              >
+                                @{att.kind}:{att.title}
                               </span>
-                              <ExternalLink className="h-3 w-3 shrink-0 opacity-75" aria-hidden="true" />
-                            </button>
-                          );
-                        }
-                        return (
-                          <span
-                            key={`${att.kind}-${att.id}`}
-                            className="inline-flex max-w-full items-center gap-1 font-mono text-slate-500 dark:text-slate-400"
-                            title={
-                              liveSnippet
-                                ? `Source snippet: ${liveSnippet.title}`
-                                : 'This snippet was deleted from the vault'
+                            );
+                          }
+
+                          const liveSnippet = snippets.find((s) => s.id === att.id);
+                          const expandKey = `${msg.id}:${att.id}`;
+                          const isExpanded = Boolean(expandedAttachmentKeys[expandKey]);
+
+                          if (liveSnippet) {
+                            const displayTitle = liveSnippet.title || att.title;
+                            const tooltip =
+                              liveSnippet.title !== att.title
+                                ? `Open "${liveSnippet.title}" in Snippets (attached as "${att.title}")`
+                                : `Open "${displayTitle}" in Snippets`;
+
+                            if (isExpanded) {
+                              expandedPreviews.push({
+                                key: expandKey,
+                                snippetId: liveSnippet.id,
+                                title: displayTitle,
+                                language: liveSnippet.language,
+                                code: liveSnippet.code,
+                                version: liveSnippet.version,
+                                deleted: false,
+                              });
                             }
-                          >
-                            <span className="truncate">
-                              @{att.kind}:{att.title}
+
+                            return (
+                              <span
+                                key={`${att.kind}-${att.id}`}
+                                className="inline-flex max-w-full flex-wrap items-center gap-1.5 rounded-lg border border-teal-600/25 bg-teal-500/10 px-2 py-1 text-teal-700 dark:border-teal-500/25 dark:bg-teal-500/10 dark:text-teal-300"
+                              >
+                                {onOpenSnippet ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenSnippet(att.id)}
+                                    title={tooltip}
+                                    aria-label={`Open snippet ${displayTitle} in Snippets tab`}
+                                    className="inline-flex max-w-full cursor-pointer items-center gap-1 rounded-sm text-left font-mono underline decoration-teal-600/50 underline-offset-2 transition-colors hover:text-teal-900 hover:decoration-teal-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 dark:decoration-teal-400/50 dark:hover:text-teal-200 dark:hover:decoration-teal-300"
+                                  >
+                                    <span className="truncate">
+                                      @{att.kind}:{displayTitle}
+                                    </span>
+                                    <ExternalLink className="h-3 w-3 shrink-0 opacity-75" aria-hidden="true" />
+                                  </button>
+                                ) : (
+                                  <span className="truncate font-mono">
+                                    @{att.kind}:{displayTitle}
+                                  </span>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => toggleAttachmentPreview(expandKey)}
+                                  aria-expanded={isExpanded}
+                                  aria-controls={`attachment-preview-${expandKey}`}
+                                  aria-label={
+                                    isExpanded
+                                      ? `Collapse full code for ${displayTitle}`
+                                      : `Expand full code for ${displayTitle}`
+                                  }
+                                  title={
+                                    isExpanded
+                                      ? 'Collapse inline code view'
+                                      : 'Expand to view full code snippet on this page'
+                                  }
+                                  className="inline-flex cursor-pointer items-center gap-0.5 rounded px-1.5 py-0.5 font-sans text-[11px] font-medium text-teal-800 transition-colors hover:bg-teal-600/15 dark:text-teal-200 dark:hover:bg-teal-400/15"
+                                >
+                                  {isExpanded ? (
+                                    <>
+                                      <ChevronUp className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                      Hide code
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ChevronDown className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                      View code
+                                    </>
+                                  )}
+                                </button>
+                              </span>
+                            );
+                          }
+
+                          const snapshot = extractSnippetSnapshotFromSentContext(msg.sentContext, att.title);
+                          if (snapshot && isExpanded) {
+                            expandedPreviews.push({
+                              key: expandKey,
+                              snippetId: att.id,
+                              title: att.title,
+                              language: snapshot.language,
+                              code: snapshot.code,
+                              deleted: true,
+                              truncated: snapshot.truncated,
+                            });
+                          }
+
+                          return (
+                            <span
+                              key={`${att.kind}-${att.id}`}
+                              className="inline-flex max-w-full flex-wrap items-center gap-1.5 rounded-lg border border-rose-500/35 bg-rose-500/10 px-2 py-1 text-rose-800 dark:border-rose-400/30 dark:bg-rose-950/40 dark:text-rose-300"
+                              title={`Source snippet "${att.title}" was deleted from the Snippets tab`}
+                            >
+                              <Trash2
+                                className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400"
+                                aria-label="Deleted snippet"
+                              />
+                              <span className="truncate font-mono line-through decoration-rose-500/60">
+                                @{att.kind}:{att.title}
+                              </span>
+                              <span className="rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 dark:text-rose-300">
+                                Deleted
+                              </span>
+                              {snapshot && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleAttachmentPreview(expandKey)}
+                                  aria-expanded={isExpanded}
+                                  aria-controls={`attachment-preview-${expandKey}`}
+                                  aria-label={
+                                    isExpanded
+                                      ? `Collapse captured code snapshot for deleted snippet ${att.title}`
+                                      : `Expand captured code snapshot for deleted snippet ${att.title}`
+                                  }
+                                  title={
+                                    isExpanded
+                                      ? 'Hide sent code snapshot'
+                                      : 'View code snapshot captured when this prompt was sent'
+                                  }
+                                  className="inline-flex cursor-pointer items-center gap-0.5 rounded px-1.5 py-0.5 font-sans text-[11px] font-medium text-rose-800 transition-colors hover:bg-rose-500/20 dark:text-rose-200"
+                                >
+                                  {isExpanded ? (
+                                    <>
+                                      <ChevronUp className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                      Hide snapshot
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ChevronDown className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                      View snapshot
+                                    </>
+                                  )}
+                                </button>
+                              )}
                             </span>
-                            {!liveSnippet && <span className="text-[10px]">(deleted)</span>}
-                          </span>
-                        );
-                      }
-                      return (
-                        <span key={`${att.kind}-${att.id}`} className="font-mono">
-                          @{att.kind}:{att.title}
-                        </span>
-                      );
-                    })}
-                  </div>
-                )}
+                          );
+                        })}
+                      </div>
+
+                      {expandedPreviews.length > 0 && (
+                        <div className="space-y-2.5">
+                          {expandedPreviews.map((item) => (
+                            <div
+                              key={item.key}
+                              id={`attachment-preview-${item.key}`}
+                              className={`overflow-hidden rounded-xl border ${
+                                item.deleted
+                                  ? 'border-rose-500/35 bg-rose-500/5 dark:border-rose-400/25 dark:bg-rose-950/20'
+                                  : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/70'
+                              }`}
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/80 px-3 py-2 text-xs dark:border-slate-800/80">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  {item.deleted ? (
+                                    <Trash2
+                                      className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400"
+                                      aria-hidden="true"
+                                    />
+                                  ) : (
+                                    <Code2
+                                      className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400"
+                                      aria-hidden="true"
+                                    />
+                                  )}
+                                  <span className="truncate font-mono font-medium text-slate-800 dark:text-slate-200">
+                                    {item.title}
+                                  </span>
+                                  {item.version !== undefined && (
+                                    <span className="rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[10px] text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                                      v{item.version}
+                                    </span>
+                                  )}
+                                  {item.deleted && (
+                                    <span className="rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 dark:text-rose-300">
+                                      Deleted from Snippets · Sent snapshot
+                                      {item.truncated ? ' (truncated)' : ''}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  {!item.deleted && onOpenSnippet && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onOpenSnippet(item.snippetId)}
+                                      className="inline-flex cursor-pointer items-center gap-1 font-medium text-teal-700 hover:underline dark:text-teal-400"
+                                    >
+                                      Open in Snippets
+                                      <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleAttachmentPreview(item.key)}
+                                    className="inline-flex cursor-pointer items-center gap-1 text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+                                  >
+                                    <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                                    Collapse
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="px-3">
+                                <CodeBlock
+                                  code={item.code}
+                                  language={item.language}
+                                  showLineNumbers
+                                  onSaveSnippet={
+                                    item.deleted
+                                      ? (code, language) => void onSaveSnippetFromCode(code, language)
+                                      : undefined
+                                  }
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {msg.role === 'user' ? (
                   <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-900 dark:text-slate-100">
@@ -805,17 +1020,38 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                             : ''}
                           :
                         </span>
-                        {msg.savedSnippets.map((savedRef) => (
-                          <button
-                            key={savedRef.id}
-                            type="button"
-                            onClick={() => onOpenSnippet?.(savedRef.id)}
-                            className="max-w-full truncate rounded-md border border-teal-600/30 bg-teal-500/10 px-2 py-1 font-mono text-[11px] font-medium text-teal-800 hover:bg-teal-500/20 dark:text-teal-300"
-                            title={`Open ${savedRef.title} in Snippets`}
-                          >
-                            {savedRef.title}
-                          </button>
-                        ))}
+                        {msg.savedSnippets.map((savedRef) => {
+                          const liveSaved = snippets.find((s) => s.id === savedRef.id);
+                          if (!liveSaved) {
+                            return (
+                              <span
+                                key={savedRef.id}
+                                className="inline-flex max-w-full items-center gap-1 rounded-md border border-rose-500/35 bg-rose-500/10 px-2 py-1 font-mono text-[11px] font-medium text-rose-700 dark:border-rose-400/30 dark:bg-rose-950/40 dark:text-rose-300"
+                                title={`Derived snippet "${savedRef.title}" was deleted from the Snippets tab`}
+                              >
+                                <Trash2
+                                  className="h-3 w-3 shrink-0 text-rose-600 dark:text-rose-400"
+                                  aria-label="Deleted snippet"
+                                />
+                                <span className="truncate line-through decoration-rose-500/60">
+                                  {savedRef.title}
+                                </span>
+                                <span className="font-sans text-[10px] font-semibold">Deleted</span>
+                              </span>
+                            );
+                          }
+                          return (
+                            <button
+                              key={savedRef.id}
+                              type="button"
+                              onClick={() => onOpenSnippet?.(savedRef.id)}
+                              className="max-w-full truncate rounded-md border border-teal-600/30 bg-teal-500/10 px-2 py-1 font-mono text-[11px] font-medium text-teal-800 hover:bg-teal-500/20 dark:text-teal-300"
+                              title={`Open ${liveSaved.title} in Snippets`}
+                            >
+                              {liveSaved.title}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>

@@ -110,7 +110,7 @@ Open a snippet and use **Tools & AI** (on phones) or the toolbar (on larger scre
 **How children are saved**
 
 - Every complete fenced code block in the reply becomes one child (`v2 Refactor (1/2) · <parent title>`), nested under its parent in the list. A code block that never closes, because the reply hit the token limit or you pressed Stop, is ignored, so half-written code is never saved as a version.
-- A child records the action, model, capture time and prompt in **Engineering Notes**, inherits the parent's tags plus an action tag, and shows **Parent** and **Derived** links so you can jump between versions. Developer prompts link straight to the source snippet they reference, and chat replies link straight to the snippets they created.
+- A child records the action, model, capture time and prompt in **Engineering Notes**, inherits the parent's tags plus an action tag, and shows **Parent** and **Derived** links so you can jump between versions. Developer prompts link straight to the source snippet they reference (with an inline **View code** toggle to inspect the full snippet on the same page, or a dustbin **Deleted** indicator if it was later removed), and chat replies link straight to the snippets they created.
 - Deleting a snippet keeps its children: they move up to the deleted snippet's parent.
 - Children are ordinary snippets: they are searchable, editable, covered by vault encryption and included in `.gvbackup` files.
 

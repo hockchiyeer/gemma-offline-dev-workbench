@@ -259,3 +259,54 @@ export function buildSnippetTree(
 
   return result;
 }
+
+export interface SnippetSnapshot {
+  code: string;
+  language: SupportedLanguage;
+  truncated: boolean;
+}
+
+/**
+ * Extracts the fenced code snapshot for an attached source snippet from `ChatMessage.sentContext`
+ * when the original snippet has since been deleted from the Snippets tab.
+ */
+export function extractSnippetSnapshotFromSentContext(
+  sentContext: string | undefined,
+  attachmentTitle: string
+): SnippetSnapshot | null {
+  if (!sentContext || !attachmentTitle.trim()) return null;
+  const lines = sentContext.replace(/\r\n?/g, '\n').split('\n');
+  const wanted = attachmentTitle.trim();
+  const headerRe = /^---\s+SNIPPET:\s*(.+?)\s*\(([^()]+)\)\s*---\s*$/;
+  const nextSectionRe = /^(?:---\s+[A-Z]+:.*---\s*$|\[omitted to fit local context window:)/;
+
+  let startIdx = -1;
+  let headerLang = 'typescript';
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(headerRe);
+    if (m && m[1].trim() === wanted) {
+      startIdx = i + 1;
+      headerLang = m[2].trim();
+      break;
+    }
+  }
+  if (startIdx < 0) return null;
+
+  let endIdx = lines.length;
+  for (let i = startIdx; i < lines.length; i++) {
+    if (nextSectionRe.test(lines[i])) {
+      endIdx = i;
+      break;
+    }
+  }
+
+  const section = lines.slice(startIdx, endIdx).join('\n');
+  const blocks = extractFencedCodeBlocks(section);
+  if (blocks.length === 0) return null;
+
+  return {
+    code: blocks[0].code,
+    language: blocks[0].rawLanguage ? blocks[0].language : normalizeLanguage(headerLang),
+    truncated: section.includes('[truncated to fit local context window]'),
+  };
+}
