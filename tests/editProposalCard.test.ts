@@ -328,11 +328,3 @@ test('pane: without apply/save handlers the review buttons are disabled instead 
   const saveBtn2 = section2.slice(section2.lastIndexOf('<button', section2.indexOf('Save as new version')), section2.indexOf('Save as new version'));
   assert.ok(!saveBtn2.includes('disabled=""'));
 });
-
-test('pane: New coding chat (+) button exposes a hover/focus tooltip explaining its function', () => {
-  const html = renderPane(editChat(undefined));
-  assert.ok(html.includes('aria-label="New coding chat"'));
-  assert.ok(html.includes('aria-describedby="new-coding-chat-tooltip"'));
-  assert.ok(html.includes('id="new-coding-chat-tooltip" role="tooltip"'));
-  assert.ok(html.includes('Start a fresh conversation thread with local Gemma while keeping your existing chats saved.'));
-});

@@ -846,20 +846,23 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             </select>
           )}
 
-          <div className="group/newchat relative inline-flex">
+          <div className="relative inline-flex">
             <button
               type="button"
               onClick={onCreateSession}
               aria-label="New coding chat"
               aria-describedby="new-coding-chat-tooltip"
-              className="flex min-h-[36px] min-w-[36px] cursor-pointer items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 transition-colors hover:border-teal-500/50 hover:bg-teal-50/70 hover:text-teal-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-teal-500/40 dark:hover:bg-teal-950/40 dark:hover:text-teal-300"
+              title="New coding chat — Start a fresh conversation thread with local Gemma while keeping your existing chats saved."
+              className="peer flex min-h-[36px] min-w-[36px] cursor-pointer items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 transition-colors hover:border-teal-500/50 hover:bg-teal-50/70 hover:text-teal-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-teal-500/40 dark:hover:bg-teal-950/40 dark:hover:text-teal-300"
             >
               <MessageSquarePlus className="h-4 w-4" />
             </button>
             <div
               id="new-coding-chat-tooltip"
               role="tooltip"
-              className="pointer-events-none invisible absolute top-full left-0 z-30 mt-2 w-56 rounded-xl border border-slate-700/80 bg-slate-900/95 px-3 py-2 text-left text-[11px] leading-snug text-slate-100 opacity-0 shadow-xl backdrop-blur-md transition-opacity duration-150 group-hover/newchat:visible group-hover/newchat:opacity-100 group-focus-within/newchat:visible group-focus-within/newchat:opacity-100 sm:left-1/2 sm:-translate-x-1/2 dark:border-slate-600/80 dark:bg-slate-950/95"
+              className={`pointer-events-none invisible absolute top-full z-30 mt-2 w-56 max-w-[calc(100vw-2rem)] rounded-xl border border-slate-700/80 bg-slate-900/95 px-3 py-2 text-left text-[11px] leading-snug text-slate-100 opacity-0 shadow-xl backdrop-blur-md transition-opacity duration-150 peer-hover:visible peer-hover:opacity-100 peer-focus-visible:visible peer-focus-visible:opacity-100 sm:right-auto sm:left-1/2 sm:-translate-x-1/2 dark:border-slate-600/80 dark:bg-slate-950/95 ${
+                sessions.length > 1 ? 'right-0' : 'left-0'
+              }`}
             >
               <div className="font-semibold text-white">New coding chat</div>
               <p className="mt-0.5 text-slate-300">

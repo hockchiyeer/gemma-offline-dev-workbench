@@ -164,4 +164,8 @@ test('GemmaAssistantPane renders expandable source snippet hyperlinks and dustbi
   assert.ok(html.includes('View snapshot'));
   assert.ok(html.includes('v2 Refactor · Deleted Child'));
   assert.ok(html.includes('@doc:Architecture Doc'));
+  assert.ok(html.includes('aria-label="New coding chat"'));
+  assert.ok(html.includes('aria-describedby="new-coding-chat-tooltip"'));
+  assert.ok(html.includes('id="new-coding-chat-tooltip" role="tooltip"'));
+  assert.ok(html.includes('Start a fresh conversation thread with local Gemma while keeping your existing chats saved.'));
 });
