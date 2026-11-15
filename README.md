@@ -138,6 +138,26 @@ the prompt once the reply and reasoning reserve are subtracted). Because earlier
 across turns, chats store the attached text with each message and prompts are larger than before; condensing and
 the meter are there to manage that.
 
+## Reviewing AI edits (Edit mode)
+
+Instead of rewriting a whole snippet, Gemma can propose **small, reviewable changes**:
+
+1. Attach a snippet and switch **Edit mode** on above the composer, or use **Edit…** in the Snippets tab, then
+   describe the change.
+2. Gemma answers with `SEARCH`/`REPLACE` blocks (exact lines to find, and what to put there). Each change is
+   located in the snippet's *current* code: exact match first, then ignoring whitespace (re-indenting the new
+   lines to fit), then a close match for small misquotes. Ambiguous or missing matches are reported, never guessed.
+3. A review card under the reply shows every change as a diff with its line range and match quality. Untick any
+   change you don't want, then choose **Save as new version** (keeps the original; the new version can be compared
+   with its parent via **Compare with parent**) or **Apply to original** (with **Undo**).
+4. If some blocks don't match, Gemma is asked once, automatically, to re-send just those against the current code;
+   you can ask again from the card.
+
+Safety: nothing is written until you click. *Apply* is refused if the snippet changed since the preview, *Undo* is
+refused if it changed after the edit, and a quick bracket/string check warns when an edit would make the code look
+worse than it was (it is a heuristic, not a compiler). Edit replies use a lower temperature, and the format
+instructions travel with the message rather than the system prompt, so the runtime's prompt cache stays warm.
+
 ## Slow or stuck answers
 
 Gemma 4 normally *reasons* before it writes the answer. On a CPU-only machine that phase can take minutes for a simple question, so the chat shows what it is doing while you wait:

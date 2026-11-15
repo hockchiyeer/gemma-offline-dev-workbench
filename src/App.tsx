@@ -55,6 +55,7 @@ import {
   createChildSnippets,
   extractFencedCodeBlocks,
 } from './lib/snippetLineage';
+import { hashText } from './lib/editEngine';
 import type {
   ChatAttachmentRef,
   ChatSession,
@@ -454,6 +455,67 @@ function AppShell() {
         parentId: parent.id,
         parentTitle: parent.title,
       }));
+    },
+    []
+  );
+
+  /**
+   * Overwrites a snippet with edited code, but only if it is still exactly what the edit preview was
+   * computed from; otherwise the user would silently lose changes made in the meantime.
+   */
+  const handleApplyEditToSnippet = useCallback(
+    async (
+      snippetId: string,
+      newCode: string,
+      expectedHash: string
+    ): Promise<{ ok: true } | { ok: false; reason: string }> => {
+      const current = workspaceRef.current?.snippets.find((s) => s.id === snippetId);
+      if (!current) return { ok: false, reason: 'That snippet no longer exists.' };
+      if (hashText(current.code) !== expectedHash) {
+        return {
+          ok: false,
+          reason: 'The snippet changed after this preview was generated, so nothing was applied. Review the edit again.',
+        };
+      }
+      const updated: CodeSnippet = { ...current, code: newCode, updatedAt: Date.now() };
+      setWorkspace((prev) =>
+        prev ? { ...prev, snippets: prev.snippets.map((s) => (s.id === snippetId ? updated : s)) } : prev
+      );
+      // Keep the ref in step immediately so a quick Undo/Apply sees the new code.
+      if (workspaceRef.current) {
+        workspaceRef.current = {
+          ...workspaceRef.current,
+          snippets: workspaceRef.current.snippets.map((s) => (s.id === snippetId ? updated : s)),
+        };
+      }
+      await saveQueueRef.current.now(`snip:${snippetId}`, () => saveSnippet(updated, cryptoKeyRef.current));
+      showToastRef.current(`Updated "${current.title}"`);
+      return { ok: true };
+    },
+    []
+  );
+
+  const handleSaveEditAsVersion = useCallback(
+    async (input: {
+      parentSnippetId: string;
+      newCode: string;
+      prompt: string;
+      model?: string;
+    }): Promise<SavedSnippetRef | null> => {
+      const parent = workspaceRef.current?.snippets.find((s) => s.id === input.parentSnippetId);
+      if (!parent) return null;
+      const [derived] = createChildSnippets({
+        parent,
+        blocks: [{ code: input.newCode, language: parent.language, rawLanguage: '' }],
+        actionKind: 'edit',
+        prompt: input.prompt,
+        model: input.model,
+      });
+      const child: CodeSnippet = { ...derived, baseHash: hashText(parent.code) };
+      setWorkspace((prev) => (prev ? { ...prev, snippets: [...prev.snippets, child] } : prev));
+      await saveQueueRef.current.now(`snip:${child.id}`, () => saveSnippet(child, cryptoKeyRef.current));
+      showToastRef.current(`Saved new version under "${parent.title}"`);
+      return { id: child.id, title: child.title, parentId: parent.id, parentTitle: parent.title };
     },
     []
   );
@@ -1000,6 +1062,8 @@ function AppShell() {
                 onOpenRuntimeModal={() => setRuntimeModalOpen(true)}
                 onSaveSnippetFromCode={handleSaveSnippetFromCode}
                 onSaveGeneratedSnippets={handleSaveGeneratedSnippets}
+                onApplyEditToSnippet={handleApplyEditToSnippet}
+                onSaveEditAsVersion={handleSaveEditAsVersion}
                 onOpenSnippet={handleOpenSnippet}
                 queuedPrompt={queuedPrompt}
                 onClearQueuedPrompt={() => setQueuedPrompt(null)}

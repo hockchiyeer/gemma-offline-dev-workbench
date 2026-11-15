@@ -20,6 +20,7 @@ const ACTION_LABELS: Record<SnippetActionKind, string> = {
   refactor: 'Refactor',
   expand: 'Expand',
   'unit-tests': 'Unit Tests',
+  edit: 'Edit',
   chat: 'AI Variant',
 };
 
@@ -85,7 +86,8 @@ export function extractFencedCodeBlocks(markdown: string): ExtractedCodeBlock[] 
  * the code block's Save Snippet button.
  */
 export function shouldAutoSaveChildSnippets(kind: SnippetActionKind): boolean {
-  return kind !== 'explain';
+  // 'edit' replies are reviewed and applied explicitly (see EditProposalCard), never auto-saved.
+  return kind !== 'explain' && kind !== 'edit';
 }
 
 export function inferActionKindFromPrompt(

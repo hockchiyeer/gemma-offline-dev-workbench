@@ -29,7 +29,9 @@ import type {
   SnippetActionKind,
   SupportedLanguage,
 } from '../types/vault';
+import { diffLines, diffStats, hashText } from '../lib/editEngine';
 import { CodeBlock } from './CodeBlock';
+import { DiffView } from './DiffView';
 import { useConfirm } from './ConfirmDialog';
 
 interface SnippetsViewProps {
@@ -79,6 +81,7 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
   const [viewMode, setViewMode] = useState<'edit' | 'preview'>('edit');
   const [copied, setCopied] = useState(false);
   const [tagInput, setTagInput] = useState('');
+  const [showParentDiff, setShowParentDiff] = useState(false);
 
   useEffect(() => {
     if (mobileOpenNonce && mobileOpenNonce > 0) {
@@ -136,6 +139,20 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
       .filter((s) => s.parentId === activeSnippet.id)
       .sort((a, b) => a.createdAt - b.createdAt);
   }, [snippets, activeSnippet]);
+
+  // Reset the comparison when another snippet is selected.
+  useEffect(() => {
+    setShowParentDiff(false);
+  }, [activeSnippet?.id]);
+
+  const parentDiff = useMemo(() => {
+    if (!showParentDiff || !activeSnippet || !parentSnippet) return null;
+    const ops = diffLines(parentSnippet.code, activeSnippet.code);
+    return { ops, stats: diffStats(ops) };
+  }, [showParentDiff, activeSnippet, parentSnippet]);
+
+  const parentChangedSince =
+    !!activeSnippet?.baseHash && !!parentSnippet && hashText(parentSnippet.code) !== activeSnippet.baseHash;
 
   const metrics = useMemo(
     () => (activeSnippet ? analyzeCodeLocally(activeSnippet.code) : null),
@@ -600,6 +617,12 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                     prompt: 'Implement or expand this snippet based on any comments, TODOs, or starter template. Complete unfinished logic into clean, idiomatic code with sensible edge-case handling.',
                   },
                   {
+                    kind: 'edit' as SnippetActionKind,
+                    label: 'Edit…',
+                    title: 'Describe a change; Gemma proposes small edits you review, accept per change, then apply or save as a new version',
+                    prompt: 'Make this change: ',
+                  },
+                  {
                     kind: 'unit-tests' as SnippetActionKind,
                     label: 'Unit Tests',
                     title: 'Generate unit tests for normal and edge cases',
@@ -638,6 +661,16 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
                     Parent: {parentSnippet.title}
                   </button>
                 )}
+                {parentSnippet && (
+                  <button
+                    type="button"
+                    onClick={() => setShowParentDiff((v) => !v)}
+                    aria-expanded={showParentDiff}
+                    className="font-medium text-slate-700 hover:underline dark:text-slate-300"
+                  >
+                    {showParentDiff ? 'Hide changes' : 'Compare with parent'}
+                  </button>
+                )}
                 {derivedChildren.length > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="text-slate-500 dark:text-slate-400">
@@ -660,6 +693,28 @@ export const SnippetsView: React.FC<SnippetsViewProps> = ({
             )}
 
             <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 sm:space-y-4">
+              {parentSnippet && parentDiff && (
+                <section
+                  aria-label="Changes from parent"
+                  className="space-y-2 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900/60"
+                >
+                  <div className="flex flex-wrap items-center gap-x-3 text-xs text-slate-600 dark:text-slate-400">
+                    <span className="font-medium text-slate-800 dark:text-slate-200">
+                      Changes from “{parentSnippet.title}”
+                    </span>
+                    <span className="font-mono tabular-nums">
+                      <span className="text-emerald-700 dark:text-emerald-400">+{parentDiff.stats.added}</span>{' '}
+                      <span className="text-red-700 dark:text-red-400">−{parentDiff.stats.removed}</span>
+                    </span>
+                    {parentChangedSince && (
+                      <span className="text-amber-700 dark:text-amber-400">
+                        The parent was edited after this version was created, so this compares against its current code.
+                      </span>
+                    )}
+                  </div>
+                  <DiffView ops={parentDiff.ops} label={`Changes from ${parentSnippet.title}`} />
+                </section>
+              )}
               {viewMode === 'edit' ? (
                 <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D1424]">
                   <textarea

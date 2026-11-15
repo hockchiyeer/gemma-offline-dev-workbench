@@ -33,6 +33,7 @@ export type SnippetActionKind =
   | 'refactor'
   | 'expand'
   | 'unit-tests'
+  | 'edit'
   | 'chat';
 
 export interface CodeSnippet {
@@ -44,6 +45,8 @@ export interface CodeSnippet {
   derivedAction?: SnippetActionKind;
   /** Tree depth / revision number (root = 1, child = 2, grandchild = 3...). */
   version?: number;
+  /** Hash of the parent's code when this version was derived (lets the UI flag a parent that changed since). */
+  baseHash?: string;
   title: string;
   language: SupportedLanguage;
   code: string;
@@ -78,6 +81,39 @@ export interface SavedSnippetRef {
   title: string;
   parentId?: string;
   parentTitle?: string;
+}
+
+/** One SEARCH/REPLACE change proposed by the model. */
+export interface EditHunk {
+  id: string;
+  search: string;
+  replace: string;
+}
+
+export interface EditTarget {
+  snippetId: string;
+  /** Snippet title at proposal time (the snippet may be renamed or deleted later). */
+  title: string;
+  /** Hash of the snippet's code when the proposal was made. */
+  baseHash: string;
+  hunks: EditHunk[];
+  /** pending: awaiting review. applied: written to the original snippet. saved: written as a new version. */
+  state: 'pending' | 'applied' | 'saved' | 'dismissed';
+  acceptedHunkIds?: string[];
+  /** For 'saved': the new version's snippet id. */
+  resultSnippetId?: string;
+  /** For 'applied': the code before the edit and a hash of the code after it, to support Undo. */
+  preImage?: string;
+  postHash?: string;
+  resolvedAt?: number;
+}
+
+export interface EditProposal {
+  targets: EditTarget[];
+  /** Problems found while reading the reply (unterminated blocks, unknown targets). */
+  issues: string[];
+  /** 0 for the first answer, 1+ for automatic follow-ups that re-send blocks which did not match. */
+  attempt: number;
 }
 
 /** Measured by the local runtime for one reply (all fields optional: runtimes report different subsets). */
@@ -115,6 +151,8 @@ export interface ChatMessage {
   sentContext?: string;
   /** Measured generation stats for an assistant reply. */
   stats?: GenerationStats;
+  /** Edits proposed in this assistant reply, awaiting review (Edit mode). */
+  edits?: EditProposal;
   thinking?: string;
   model?: string;
   createdAt: number;

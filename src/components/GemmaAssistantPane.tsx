@@ -8,6 +8,7 @@ import {
   ExternalLink,
   GitBranch,
   MessageSquarePlus,
+  FilePenLine,
   Paperclip,
   RefreshCw,
   Send,
@@ -23,6 +24,13 @@ import {
   type ProbeResult,
 } from '../lib/gemmaClient';
 import { compactConversation } from '../lib/compaction';
+import { hashText } from '../lib/editEngine';
+import {
+  EDIT_INSTRUCTION_BLOCK,
+  MAX_AUTO_REPAIRS,
+  buildProposalFromReply,
+  repairPromptFor,
+} from '../lib/editProposal';
 import { inputBudgetTokens, planCompaction } from '../lib/contextEngine';
 import { estimateMessagesTokens, estimateTokens, getCalibration, recordCalibrationSample } from '../lib/tokenEstimate';
 import {
@@ -36,6 +44,7 @@ import type {
   ChatSession,
   CodeSnippet,
   DocPage,
+  EditTarget,
   GenerationStats,
   LocalRuntimeConfig,
   SavedSnippetRef,
@@ -45,6 +54,7 @@ import type {
 import { ChatThreadJumpRail, extractConversationTurns } from './ChatThreadJumpRail';
 import { CodeBlock } from './CodeBlock';
 import { ContextBar } from './ContextBar';
+import { EditProposalCard, type ApplyEditArgs, type SaveVersionArgs } from './EditProposalCard';
 import { useConfirm } from './ConfirmDialog';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
@@ -76,6 +86,19 @@ interface GemmaAssistantPaneProps {
     assistantMarkdown: string;
   }) => Promise<SavedSnippetRef[]>;
   onOpenSnippet?: (snippetId: string) => void;
+  /** Overwrites a snippet's code if it still matches `expectedHash` (Edit mode "Apply to original"). */
+  onApplyEditToSnippet?: (
+    snippetId: string,
+    newCode: string,
+    expectedHash: string
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  /** Saves edited code as a new child version of a snippet (Edit mode "Save as new version"). */
+  onSaveEditAsVersion?: (input: {
+    parentSnippetId: string;
+    newCode: string;
+    prompt: string;
+    model?: string;
+  }) => Promise<SavedSnippetRef | null>;
   queuedPrompt?: {
     prompt: string;
     attachments: ChatAttachmentRef[];
@@ -127,6 +150,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   onSaveSnippetFromCode,
   onSaveGeneratedSnippets,
   onOpenSnippet,
+  onApplyEditToSnippet,
+  onSaveEditAsVersion,
   queuedPrompt,
   onClearQueuedPrompt,
 }) => {
@@ -146,6 +171,12 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   const [waitSeconds, setWaitSeconds] = useState(0);
   const [contextTrimmed, setContextTrimmed] = useState(false);
   const [compacting, setCompacting] = useState(false);
+  // Follow-up queued after an edit reply whose blocks did not match; sent once the runtime is idle.
+  const [pendingRepair, setPendingRepair] = useState<{
+    prompt: string;
+    attachments: ChatAttachmentRef[];
+    attempt: number;
+  } | null>(null);
   const [expandedAttachmentKeys, setExpandedAttachmentKeys] = useState<Record<string, boolean>>({});
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [highlightedTurnId, setHighlightedTurnId] = useState<string | null>(null);
@@ -288,6 +319,9 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     return blocks;
   };
 
+  // Edit mode: the reply is read as SEARCH/REPLACE blocks to review, not as code to save wholesale.
+  const editMode = pendingActionKind === 'edit' && attachments.some((a) => a.kind === 'snippet');
+
   const promptBudget = useMemo(
     () => ({
       contextTokens: runtimeConfig.contextTokens,
@@ -304,11 +338,11 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     return buildGemmaMessages(
       runtimeConfig.systemPrompt,
       [...activeSession.messages, draftMessage],
-      resolveContextBlocks(attachments),
+      editMode ? [EDIT_INSTRUCTION_BLOCK, ...resolveContextBlocks(attachments)] : resolveContextBlocks(attachments),
       promptBudget,
       { summary: activeSession.summary, calibration: getCalibration(runtimeConfig.selectedModel) }
     ).usage;
-  }, [activeSession, deferredInput, attachments, runtimeConfig, promptBudget, snippets, docs]);
+  }, [activeSession, deferredInput, attachments, editMode, runtimeConfig, promptBudget, snippets, docs]);
 
   const lastStats = useMemo(() => {
     const msgs = activeSession?.messages ?? [];
@@ -371,6 +405,112 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     }
   };
 
+  // --- Edit proposals -------------------------------------------------------------------------
+
+  const precedingUserOf = (msgId: string): ChatMessage | undefined => {
+    const msgs = activeSession?.messages ?? [];
+    for (let k = msgs.findIndex((m) => m.id === msgId) - 1; k >= 0; k--) {
+      if (msgs[k].role === 'user') return msgs[k];
+    }
+    return undefined;
+  };
+
+  const updateEditTarget = async (msgId: string, targetIndex: number, patch: Partial<EditTarget>) => {
+    if (!activeSession) return;
+    await onUpdateSession(
+      {
+        ...activeSession,
+        messages: activeSession.messages.map((m) =>
+          m.id === msgId && m.edits
+            ? { ...m, edits: { ...m.edits, targets: m.edits.targets.map((t, i) => (i === targetIndex ? { ...t, ...patch } : t)) } }
+            : m
+        ),
+        updatedAt: Date.now(),
+      },
+      { immediate: true }
+    );
+  };
+
+  const handleApplyEdit = async (msg: ChatMessage, targetIndex: number, args: ApplyEditArgs) => {
+    const target = msg.edits?.targets[targetIndex];
+    const snippet = target && snippets.find((s) => s.id === target.snippetId);
+    if (!target || !snippet || !onApplyEditToSnippet) return;
+    const res = await onApplyEditToSnippet(target.snippetId, args.newCode, args.expectedHash);
+    if (!res.ok) {
+      setStreamError(res.reason);
+      return;
+    }
+    setStreamError(null);
+    await updateEditTarget(msg.id, targetIndex, {
+      state: 'applied',
+      acceptedHunkIds: args.acceptedHunkIds,
+      preImage: snippet.code,
+      postHash: hashText(args.newCode),
+      resolvedAt: Date.now(),
+    });
+  };
+
+  const handleSaveEditVersion = async (msg: ChatMessage, targetIndex: number, args: SaveVersionArgs) => {
+    const target = msg.edits?.targets[targetIndex];
+    if (!target || !onSaveEditAsVersion) return;
+    const ref = await onSaveEditAsVersion({
+      parentSnippetId: target.snippetId,
+      newCode: args.newCode,
+      prompt: precedingUserOf(msg.id)?.content ?? '',
+      model: msg.model,
+    });
+    if (!ref) {
+      setStreamError('Could not save the new version: the original snippet no longer exists.');
+      return;
+    }
+    setStreamError(null);
+    await updateEditTarget(msg.id, targetIndex, {
+      state: 'saved',
+      acceptedHunkIds: args.acceptedHunkIds,
+      resultSnippetId: ref.id,
+      resolvedAt: Date.now(),
+    });
+  };
+
+  const handleUndoEdit = async (msg: ChatMessage, targetIndex: number) => {
+    const target = msg.edits?.targets[targetIndex];
+    const snippet = target && snippets.find((s) => s.id === target.snippetId);
+    if (!target || !snippet || !onApplyEditToSnippet || target.preImage === undefined || !target.postHash) return;
+    if (hashText(snippet.code) !== target.postHash) {
+      setStreamError('Cannot undo: the snippet was changed after this edit.');
+      return;
+    }
+    const res = await onApplyEditToSnippet(target.snippetId, target.preImage, target.postHash);
+    if (!res.ok) {
+      setStreamError(res.reason);
+      return;
+    }
+    setStreamError(null);
+    await updateEditTarget(msg.id, targetIndex, {
+      state: 'pending',
+      acceptedHunkIds: undefined,
+      preImage: undefined,
+      postHash: undefined,
+      resolvedAt: undefined,
+    });
+  };
+
+  const handleRepairClick = (msg: ChatMessage) => {
+    if (!msg.edits) return;
+    const refs = (precedingUserOf(msg.id)?.attachments ?? []).filter((a) => a.kind === 'snippet');
+    const current = refs.map((r) => snippets.find((s) => s.id === r.id)).filter((s): s is CodeSnippet => Boolean(s));
+    const prompt = repairPromptFor(msg.edits, current);
+    if (prompt) setPendingRepair({ prompt, attachments: refs, attempt: msg.edits.attempt + 1 });
+  };
+
+  useEffect(() => {
+    if (!pendingRepair || streaming || compacting) return;
+    const repair = pendingRepair;
+    setPendingRepair(null);
+    void handleSend(repair.prompt, { attachments: repair.attachments, actionKind: 'edit', attempt: repair.attempt });
+    // handleSend is recreated every render; the latest one is used when this effect fires.
+  }, [pendingRepair, streaming, compacting]);
+
   const handleDeleteCurrentSession = async () => {
     if (!activeSession || sessions.length <= 1) return;
     const accepted = await confirm({
@@ -383,18 +523,23 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     await onDeleteSession(activeSession.id);
   };
 
-  const handleSend = async (customPrompt?: string) => {
+  const handleSend = async (
+    customPrompt?: string,
+    opts?: { attachments?: ChatAttachmentRef[]; actionKind?: SnippetActionKind; attempt?: number }
+  ) => {
     const text = (customPrompt ?? input).trim();
     if (!text || !activeSession || streaming || compacting) return;
 
     setStreamError(null);
     setContextTrimmed(false);
     const now = Date.now();
-    const usedAttachments = [...attachments];
+    const usedAttachments = [...(opts?.attachments ?? attachments)];
     const primarySnippetAttachment = usedAttachments.find((a) => a.kind === 'snippet');
     const resolvedActionKind = primarySnippetAttachment
-      ? inferActionKindFromPrompt(text, pendingActionKind)
+      ? inferActionKindFromPrompt(text, opts?.actionKind ?? pendingActionKind)
       : undefined;
+    const isEditTurn = resolvedActionKind === 'edit';
+    const editAttempt = opts?.attempt ?? 0;
 
     const userMsg: ChatMessage = {
       id: `msg-${crypto.randomUUID()}`,
@@ -430,8 +575,11 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     // Persist the user message once up front; stream tokens in-memory to avoid IDB/AES thrashing.
     await onUpdateSession(baseSession, { immediate: true });
     if (!customPrompt) setInput('');
-    setAttachments([]);
-    setPendingActionKind(undefined);
+    // An automatic follow-up must not wipe what the user is composing meanwhile.
+    if (!opts?.attachments) {
+      setAttachments([]);
+      setPendingActionKind(undefined);
+    }
     setShowAttachDrawer(false);
 
     const controller = new AbortController();
@@ -488,7 +636,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       const built = buildGemmaMessages(
         runtimeConfig.systemPrompt,
         historyWithUser,
-        resolveContextBlocks(usedAttachments),
+        isEditTurn ? [EDIT_INSTRUCTION_BLOCK, ...resolveContextBlocks(usedAttachments)] : resolveContextBlocks(usedAttachments),
         promptBudget,
         { summary, calibration }
       );
@@ -507,7 +655,10 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       await onUpdateSession(workingSession, { immediate: true });
 
       const finalText = await streamLocalGemmaChat({
-        config: runtimeConfig,
+        // Exact quoting matters more than variety when proposing SEARCH/REPLACE edits.
+        config: isEditTurn
+          ? { ...runtimeConfig, temperature: Math.min(runtimeConfig.temperature, 0.2) }
+          : runtimeConfig,
         messages: built.messages,
         transportHint: probe.transport,
         signal: controller.signal,
@@ -544,10 +695,20 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
           });
         }
       }
+      const editSnippets = usedAttachments
+        .filter((a) => a.kind === 'snippet')
+        .map((a) => snippets.find((s) => s.id === a.id))
+        .filter((s): s is CodeSnippet => Boolean(s));
+      const editProposal =
+        isEditTurn && finalText.trim()
+          ? buildProposalFromReply({ reply: finalText, snippets: editSnippets, attempt: editAttempt })
+          : null;
+      // An edit reply with no SEARCH/REPLACE blocks (plain code) falls back to saving it as a version.
+      const autoSave = isEditTurn ? !editProposal : shouldAutoSaveChildSnippets(resolvedActionKind || 'chat');
       const savedSnippets =
         primarySnippetAttachment &&
         finalText.trim() &&
-        shouldAutoSaveChildSnippets(resolvedActionKind || 'chat')
+        autoSave
           ? await onSaveGeneratedSnippets({
               parentSnippetId: primarySnippetAttachment.id,
               actionKind: resolvedActionKind || 'chat',
@@ -567,6 +728,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                 thinking: savedThinking,
                 durationMs: elapsed,
                 stats: measured,
+                edits: editProposal ?? undefined,
                 savedSnippets: savedSnippets.length > 0 ? savedSnippets : undefined,
               }
             : m
@@ -574,6 +736,18 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         updatedAt: Date.now(),
       };
       await onUpdateSession(completedSession, { immediate: true });
+
+      // Blocks that did not match (or a cut-off reply): ask once, automatically, for just those blocks.
+      if (editProposal && editAttempt < MAX_AUTO_REPAIRS) {
+        const repair = repairPromptFor(editProposal, editSnippets);
+        if (repair) {
+          setPendingRepair({
+            prompt: repair,
+            attachments: usedAttachments.filter((a) => a.kind === 'snippet'),
+            attempt: editAttempt + 1,
+          });
+        }
+      }
     } catch (err) {
       const isAbort =
         Boolean(err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError');
@@ -672,20 +846,34 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             </select>
           )}
 
-          <button
-            type="button"
-            onClick={onCreateSession}
-            aria-label="New coding chat"
-            className="flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
-          >
-            <MessageSquarePlus className="h-4 w-4" />
-          </button>
+          <div className="group/newchat relative inline-flex">
+            <button
+              type="button"
+              onClick={onCreateSession}
+              aria-label="New coding chat"
+              aria-describedby="new-coding-chat-tooltip"
+              className="flex min-h-[36px] min-w-[36px] cursor-pointer items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 transition-colors hover:border-teal-500/50 hover:bg-teal-50/70 hover:text-teal-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-teal-500/40 dark:hover:bg-teal-950/40 dark:hover:text-teal-300"
+            >
+              <MessageSquarePlus className="h-4 w-4" />
+            </button>
+            <div
+              id="new-coding-chat-tooltip"
+              role="tooltip"
+              className="pointer-events-none invisible absolute top-full left-0 z-30 mt-2 w-56 rounded-xl border border-slate-700/80 bg-slate-900/95 px-3 py-2 text-left text-[11px] leading-snug text-slate-100 opacity-0 shadow-xl backdrop-blur-md transition-opacity duration-150 group-hover/newchat:visible group-hover/newchat:opacity-100 group-focus-within/newchat:visible group-focus-within/newchat:opacity-100 sm:left-1/2 sm:-translate-x-1/2 dark:border-slate-600/80 dark:bg-slate-950/95"
+            >
+              <div className="font-semibold text-white">New coding chat</div>
+              <p className="mt-0.5 text-slate-300">
+                Start a fresh conversation thread with local Gemma while keeping your existing chats saved.
+              </p>
+            </div>
+          </div>
 
           {sessions.length > 1 && activeSession && (
             <button
               type="button"
               onClick={handleDeleteCurrentSession}
               aria-label="Delete current chat"
+              title="Delete current chat session"
               className="flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-red-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400 dark:hover:text-red-400"
             >
               <Trash2 className="h-4 w-4" />
@@ -696,6 +884,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             type="button"
             onClick={onRescanRuntime}
             disabled={probing}
+            title="Scan local runtime endpoints for available Gemma models"
             className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${probing ? 'animate-spin' : ''}`} />
@@ -705,6 +894,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
           <button
             type="button"
             onClick={onOpenRuntimeModal}
+            title="Configure local Gemma runtime, model, and prompt budget"
             className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             <Settings2 className="h-3.5 w-3.5" />
@@ -1074,6 +1264,21 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                         )
                       }
                     />
+                    {msg.edits && !isStreamingThis && (
+                      <EditProposalCard
+                        proposal={msg.edits}
+                        snippets={snippets}
+                        busy={streaming || compacting || !onApplyEditToSnippet || !onSaveEditAsVersion}
+                        onApply={(ti, args) => handleApplyEdit(msg, ti, args)}
+                        onSaveVersion={(ti, args) => handleSaveEditVersion(msg, ti, args)}
+                        onUndo={(ti) => handleUndoEdit(msg, ti)}
+                        onDismiss={(ti) =>
+                          void updateEditTarget(msg.id, ti, { state: 'dismissed', resolvedAt: Date.now() })
+                        }
+                        onRepair={() => handleRepairClick(msg)}
+                        onOpenSnippet={onOpenSnippet}
+                      />
+                    )}
                     {msg.savedSnippets && msg.savedSnippets.length > 0 && (
                       <div className="flex flex-wrap items-center gap-2 border-t border-slate-200/80 pt-2.5 text-xs text-slate-600 dark:border-slate-800/80 dark:text-slate-400">
                         <span className="inline-flex items-center gap-1 font-medium text-teal-700 dark:text-teal-400">
@@ -1202,6 +1407,30 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             onSaveSummary={handleSaveSummary}
             onClearSummary={() => persistSummary(undefined)}
           />
+
+          {onSaveEditAsVersion && attachments.some((a) => a.kind === 'snippet') && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={editMode}
+                onClick={() => setPendingActionKind(editMode ? undefined : 'edit')}
+                className={`inline-flex min-h-[32px] items-center gap-1.5 rounded-lg border px-2.5 font-medium transition-colors ${
+                  editMode
+                    ? 'border-teal-600/50 bg-teal-500/15 text-teal-800 dark:text-teal-300'
+                    : 'border-slate-300 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800'
+                }`}
+              >
+                <FilePenLine className="h-3.5 w-3.5" aria-hidden="true" />
+                Edit mode {editMode ? 'on' : 'off'}
+              </button>
+              {editMode && (
+                <span className="text-slate-500 dark:text-slate-400">
+                  Gemma proposes small changes you can review, accept per change, apply or undo.
+                </span>
+              )}
+            </div>
+          )}
 
           {showAttachDrawer && (
             <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950">
