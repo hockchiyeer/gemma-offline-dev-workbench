@@ -114,6 +114,30 @@ Open a snippet and use **Tools & AI** (on phones) or the toolbar (on larger scre
 - Deleting a snippet keeps its children: they move up to the deleted snippet's parent.
 - Children are ordinary snippets: they are searchable, editable, covered by vault encryption and included in `.gvbackup` files.
 
+## Context handling & speed
+
+Local runtimes (Ollama, llama.cpp) keep a cache of the prompt they last read and only process what changed.
+GemmaVault builds prompts to take advantage of that:
+
+- **Stable prefix.** The system prompt stays constant; attached snippets/docs go on the *latest* user message, and
+  every earlier turn is replayed exactly as it was sent (stored per message). Follow-up questions therefore reuse
+  the runtime's cache instead of re-reading the whole chat.
+- **Context meter** above the composer: estimated prompt size vs. what fits after reserving room for the reply, the
+  last reply's speed (tokens/s, as measured by the runtime), and warnings when older turns or attachments don't fit.
+- **Token budgeting.** Estimates separate prose, code and CJK text and are calibrated per model from the runtime's
+  own token counts. History and attachments each keep a guaranteed share; whole turns and whole attachments are
+  dropped (never cut mid-code-block), and an attachment cut short is closed cleanly and listed in the prompt.
+- **Condense long chats.** When history outgrows its share, the oldest turns are folded into a short summary note
+  by the same local model (Settings: *Condense long chats*; or use *Condense chat* any time). The note is visible
+  and editable under *Summary*. If a turn doesn't fit in full, it is replayed with a short `[attached: …]` marker
+  instead of being dropped.
+- **Keep model loaded** (Settings, Ollama): how long the model stays in memory after a reply (default 30 minutes).
+
+Notes: a larger **Context Window** gives all of the above more room (the default 8192 leaves roughly 2k tokens for
+the prompt once the reply and reasoning reserve are subtracted). Because earlier attachments are now remembered
+across turns, chats store the attached text with each message and prompts are larger than before; condensing and
+the meter are there to manage that.
+
 ## Slow or stuck answers
 
 Gemma 4 normally *reasons* before it writes the answer. On a CPU-only machine that phase can take minutes for a simple question, so the chat shows what it is doing while you wait:

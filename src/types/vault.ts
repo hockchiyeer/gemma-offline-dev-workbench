@@ -80,10 +80,41 @@ export interface SavedSnippetRef {
   parentTitle?: string;
 }
 
+/** Measured by the local runtime for one reply (all fields optional: runtimes report different subsets). */
+export interface GenerationStats {
+  /** Tokens the runtime evaluated for the prompt. With prompt-cache reuse this can be lower than the prompt size. */
+  promptTokens?: number;
+  /** Tokens generated, including reasoning tokens. */
+  completionTokens?: number;
+  tokensPerSecond?: number;
+  /** Time spent loading the model into memory (0 when it was already resident). */
+  loadMs?: number;
+  /** Time spent evaluating the (non-cached part of the) prompt. */
+  promptEvalMs?: number;
+}
+
+/** Rolling memory note that replaces older turns once a chat outgrows its history budget. */
+export interface ConversationSummary {
+  text: string;
+  /** Messages up to and including this id are represented by `text` and no longer replayed. */
+  coversUpToMessageId: string;
+  updatedAt: number;
+  model?: string;
+  /** True once the user edited the note by hand. */
+  edited?: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  /**
+   * Exact attached-context text that was sent with this user message. It is replayed byte-for-byte
+   * on later turns so the runtime can reuse its prompt cache instead of re-reading the whole chat.
+   */
+  sentContext?: string;
+  /** Measured generation stats for an assistant reply. */
+  stats?: GenerationStats;
   thinking?: string;
   model?: string;
   createdAt: number;
@@ -98,6 +129,8 @@ export interface ChatSession {
   projectId: string;
   title: string;
   messages: ChatMessage[];
+  /** Condensed memory of the oldest turns (see ConversationSummary). */
+  summary?: ConversationSummary;
   createdAt: number;
   updatedAt: number;
 }
@@ -115,6 +148,13 @@ export interface LocalRuntimeConfig {
    * 'auto' lets the model decide (best quality, slow on CPU); 'off' sends `think: false`.
    */
   reasoning?: 'auto' | 'off';
+  /**
+   * How long Ollama keeps the model loaded after a reply (`keep_alive`). 0 unloads immediately;
+   * undefined leaves Ollama's own default (5 minutes). Ollama only.
+   */
+  keepAliveMinutes?: number;
+  /** Condense the oldest turns into a summary note when a chat outgrows its history budget. Default on. */
+  autoCompact?: boolean;
   systemPrompt: string;
 }
 

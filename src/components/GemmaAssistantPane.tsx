@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
   Code2,
@@ -19,6 +19,9 @@ import {
   streamLocalGemmaChat,
   type ProbeResult,
 } from '../lib/gemmaClient';
+import { compactConversation } from '../lib/compaction';
+import { inputBudgetTokens, planCompaction } from '../lib/contextEngine';
+import { estimateMessagesTokens, estimateTokens, getCalibration, recordCalibrationSample } from '../lib/tokenEstimate';
 import { inferActionKindFromPrompt, shouldAutoSaveChildSnippets } from '../lib/snippetLineage';
 import type {
   ChatAttachmentRef,
@@ -26,11 +29,13 @@ import type {
   ChatSession,
   CodeSnippet,
   DocPage,
+  GenerationStats,
   LocalRuntimeConfig,
   SavedSnippetRef,
   SnippetActionKind,
   SupportedLanguage,
 } from '../types/vault';
+import { ContextBar } from './ContextBar';
 import { useConfirm } from './ConfirmDialog';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
@@ -93,6 +98,9 @@ const CODING_STARTERS = [
   },
 ];
 
+const isAbortError = (err: unknown): boolean =>
+  Boolean(err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError');
+
 export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   sessions,
   activeSessionId,
@@ -128,6 +136,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   const [modelLoaded, setModelLoaded] = useState(false);
   const [waitSeconds, setWaitSeconds] = useState(0);
   const [contextTrimmed, setContextTrimmed] = useState(false);
+  const [compacting, setCompacting] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const latestDraftRef = useRef<string>('');
@@ -149,13 +158,13 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
 
   // Elapsed-time ticker so a slow cold start is visible instead of looking frozen.
   useEffect(() => {
-    if (!streaming) {
+    if (!streaming && !compacting) {
       setWaitSeconds(0);
       return;
     }
     const id = setInterval(() => setWaitSeconds((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [streaming]);
+  }, [streaming, compacting]);
 
   useEffect(() => {
     scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -209,6 +218,89 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     return blocks;
   };
 
+  const promptBudget = useMemo(
+    () => ({
+      contextTokens: runtimeConfig.contextTokens,
+      reserveForReply: runtimeConfig.maxTokens + thinkingHeadroom(runtimeConfig),
+    }),
+    [runtimeConfig]
+  );
+
+  // Live estimate of what the next request would use (typed text is deferred to keep typing smooth).
+  const deferredInput = useDeferredValue(input);
+  const livePreview = useMemo(() => {
+    if (!activeSession) return null;
+    const draftMessage: ChatMessage = { id: 'draft', role: 'user', content: deferredInput, createdAt: 0 };
+    return buildGemmaMessages(
+      runtimeConfig.systemPrompt,
+      [...activeSession.messages, draftMessage],
+      resolveContextBlocks(attachments),
+      promptBudget,
+      { summary: activeSession.summary, calibration: getCalibration(runtimeConfig.selectedModel) }
+    ).usage;
+  }, [activeSession, deferredInput, attachments, runtimeConfig, promptBudget, snippets, docs]);
+
+  const lastStats = useMemo(() => {
+    const msgs = activeSession?.messages ?? [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].stats) return msgs[i].stats;
+    }
+    return undefined;
+  }, [activeSession]);
+
+  const persistSummary = (summary: ChatSession['summary']) => {
+    if (!activeSession) return;
+    void onUpdateSession({ ...activeSession, summary, updatedAt: Date.now() }, { immediate: true });
+  };
+
+  const handleSaveSummary = (text: string) => {
+    if (!activeSession?.summary || !text.trim()) return;
+    persistSummary({ ...activeSession.summary, text: text.trim(), edited: true, updatedAt: Date.now() });
+  };
+
+  const handleCompactNow = async () => {
+    if (!activeSession || streaming || compacting) return;
+    const calibration = getCalibration(runtimeConfig.selectedModel);
+    const plan = planCompaction(
+      activeSession.messages,
+      activeSession.summary,
+      inputBudgetTokens(promptBudget),
+      calibration.scale,
+      { force: true }
+    );
+    if (!plan) {
+      setStreamError('Nothing to condense yet: keep chatting and try again once there are a few turns.');
+      return;
+    }
+    setStreamError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setCompacting(true);
+    try {
+      const text = await compactConversation({
+        config: runtimeConfig,
+        previous: activeSession.summary,
+        messages: plan.fold,
+        signal: controller.signal,
+        transportHint: probe.transport,
+        calibrationScale: calibration.scale,
+      });
+      persistSummary({
+        text,
+        coversUpToMessageId: plan.coversUpToMessageId,
+        updatedAt: Date.now(),
+        model: runtimeConfig.selectedModel,
+      });
+    } catch (err) {
+      if (!isAbortError(err)) {
+        setStreamError(`Could not condense the chat: ${err instanceof Error ? err.message : 'unknown error'}`);
+      }
+    } finally {
+      abortRef.current = null;
+      setCompacting(false);
+    }
+  };
+
   const handleDeleteCurrentSession = async () => {
     if (!activeSession || sessions.length <= 1) return;
     const accepted = await confirm({
@@ -223,7 +315,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
 
   const handleSend = async (customPrompt?: string) => {
     const text = (customPrompt ?? input).trim();
-    if (!text || !activeSession || streaming) return;
+    if (!text || !activeSession || streaming || compacting) return;
 
     setStreamError(null);
     setContextTrimmed(false);
@@ -281,26 +373,77 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     setModelLoaded(false);
     setStreaming(true);
     const startedAt = performance.now();
+    const statsBox: { current?: GenerationStats } = {};
+    // Session as last persisted; later saves build on it so the stored context/summary are never lost.
+    let workingSession = baseSession;
 
     try {
+      const calibration = getCalibration(runtimeConfig.selectedModel);
+      let summary = activeSession.summary;
+
+      // Once the chat outgrows its history budget, fold the oldest turns into the summary note
+      // (best effort: on failure we simply continue and the builder drops what does not fit).
+      if (runtimeConfig.autoCompact !== false) {
+        const plan = planCompaction(
+          activeSession.messages,
+          summary,
+          inputBudgetTokens(promptBudget),
+          calibration.scale
+        );
+        if (plan) {
+          setCompacting(true);
+          try {
+            const text = await compactConversation({
+              config: runtimeConfig,
+              previous: summary,
+              messages: plan.fold,
+              signal: controller.signal,
+              transportHint: probe.transport,
+              calibrationScale: calibration.scale,
+            });
+            summary = {
+              text,
+              coversUpToMessageId: plan.coversUpToMessageId,
+              updatedAt: Date.now(),
+              model: runtimeConfig.selectedModel,
+            };
+          } catch (compactErr) {
+            if (isAbortError(compactErr)) throw compactErr;
+          } finally {
+            setCompacting(false);
+          }
+        }
+      }
+
       const built = buildGemmaMessages(
         runtimeConfig.systemPrompt,
         historyWithUser,
         resolveContextBlocks(usedAttachments),
-        {
-          contextTokens: runtimeConfig.contextTokens,
-          reserveForReply: runtimeConfig.maxTokens + thinkingHeadroom(runtimeConfig),
-        }
+        promptBudget,
+        { summary, calibration }
       );
       if (built.truncated) {
         setContextTrimmed(true);
       }
+
+      // Remember exactly what was sent with this message so later turns replay it identically.
+      workingSession = {
+        ...baseSession,
+        summary,
+        messages: baseSession.messages.map((m) =>
+          m.id === userMsg.id ? { ...m, sentContext: built.sentContext || undefined } : m
+        ),
+      };
+      await onUpdateSession(workingSession, { immediate: true });
 
       const finalText = await streamLocalGemmaChat({
         config: runtimeConfig,
         messages: built.messages,
         transportHint: probe.transport,
         signal: controller.signal,
+        onStats: (stats) => {
+          statsBox.current = stats;
+        },
         onFirstByte: () => setModelLoaded(true),
         onThinking: (t) => {
           latestThinkingRef.current = t;
@@ -314,6 +457,23 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
 
       const elapsed = Math.round(performance.now() - startedAt);
       const savedThinking = latestThinkingRef.current.trim() || undefined;
+      const measured = statsBox.current;
+      if (measured) {
+        // Teach the estimator how this model really tokenises (prompt-side cache hits are ignored).
+        if (measured.promptTokens) {
+          recordCalibrationSample(runtimeConfig.selectedModel, {
+            estimatedTokens: estimateMessagesTokens(built.messages, 1),
+            observedTokens: measured.promptTokens,
+            promptSide: true,
+          });
+        }
+        if (measured.completionTokens) {
+          recordCalibrationSample(runtimeConfig.selectedModel, {
+            estimatedTokens: estimateTokens(`${finalText}\n${latestThinkingRef.current}`, 1),
+            observedTokens: measured.completionTokens,
+          });
+        }
+      }
       const savedSnippets =
         primarySnippetAttachment &&
         finalText.trim() &&
@@ -328,14 +488,15 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
           : [];
 
       const completedSession: ChatSession = {
-        ...baseSession,
-        messages: baseSession.messages.map((m) =>
+        ...workingSession,
+        messages: workingSession.messages.map((m) =>
           m.id === assistantMsgId
             ? {
                 ...m,
                 content: finalText || 'Empty response returned by local Gemma model.',
                 thinking: savedThinking,
                 durationMs: elapsed,
+                stats: measured,
                 savedSnippets: savedSnippets.length > 0 ? savedSnippets : undefined,
               }
             : m
@@ -350,12 +511,12 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       const savedThinking = latestThinkingRef.current.trim() || undefined;
       if (isAbort) {
         const stoppedSession: ChatSession = {
-          ...baseSession,
+          ...workingSession,
           messages: partial
-            ? baseSession.messages.map((m) =>
+            ? workingSession.messages.map((m) =>
                 m.id === assistantMsgId ? { ...m, content: partial, thinking: savedThinking } : m
               )
-            : baseSession.messages.filter((m) => m.id !== assistantMsgId),
+            : workingSession.messages.filter((m) => m.id !== assistantMsgId),
           updatedAt: Date.now(),
         };
         await onUpdateSession(stoppedSession, { immediate: true });
@@ -366,12 +527,12 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             : 'Unable to reach local Google Gemma runtime.';
         setStreamError(message);
         const cleanedSession: ChatSession = {
-          ...baseSession,
+          ...workingSession,
           messages: partial
-            ? baseSession.messages.map((m) =>
+            ? workingSession.messages.map((m) =>
                 m.id === assistantMsgId ? { ...m, content: partial, thinking: savedThinking } : m
               )
-            : baseSession.messages.filter((m) => m.id !== assistantMsgId),
+            : workingSession.messages.filter((m) => m.id !== assistantMsgId),
           updatedAt: Date.now(),
         };
         await onUpdateSession(cleanedSession, { immediate: true });
@@ -383,6 +544,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       setStreamingDraft(null);
       setThinkingText('');
       setModelLoaded(false);
+      setCompacting(false);
       setStreaming(false);
     }
   };
@@ -550,6 +712,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                       minute: '2-digit',
                     })}
                     {msg.durationMs ? ` · ${(msg.durationMs / 1000).toFixed(1)}s` : ''}
+                    {msg.stats?.tokensPerSecond ? ` · ${msg.stats.tokensPerSecond} tok/s` : ''}
                   </span>
                 </div>
 
@@ -615,7 +778,9 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                 ) : isStreamingThis ? (
                   <div className="space-y-2 font-mono text-xs text-slate-500 dark:text-slate-400">
                     <p>
-                      {!modelLoaded
+                      {compacting
+                        ? `Condensing earlier turns into a summary… ${waitSeconds}s`
+                        : !modelLoaded
                         ? `Loading model into memory… ${waitSeconds}s (first request after idle can take a minute)`
                         : thinkingText
                           ? `Reasoning… ${waitSeconds}s`
@@ -675,6 +840,18 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       {/* Composer */}
       <div className="border-t border-slate-200 bg-white p-3 sm:p-4 dark:border-slate-800 dark:bg-slate-900/80">
         <div className="mx-auto max-w-3xl space-y-2.5">
+          <ContextBar
+            usage={livePreview}
+            lastStats={lastStats}
+            summary={activeSession?.summary}
+            streaming={streaming}
+            compacting={compacting}
+            onCompactNow={() => void handleCompactNow()}
+            onCancelCompaction={handleStop}
+            onSaveSummary={handleSaveSummary}
+            onClearSummary={() => persistSummary(undefined)}
+          />
+
           {showAttachDrawer && (
             <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950">
               <div className="mb-2 flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-300">

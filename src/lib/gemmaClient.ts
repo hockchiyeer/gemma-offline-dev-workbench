@@ -1,4 +1,8 @@
-import type { ChatMessage, GemmaModelInfo, LocalRuntimeConfig } from '../types/vault';
+import type { GemmaModelInfo, GenerationStats, LocalRuntimeConfig } from '../types/vault';
+
+// The prompt builder lives in contextEngine.ts; re-exported here so existing imports keep working.
+export { buildGemmaMessages } from './contextEngine';
+export type { BuiltGemmaPayload } from './contextEngine';
 
 export interface ProbeResult {
   connected: boolean;
@@ -316,6 +320,8 @@ export interface StreamGemmaOptions {
   onThinking?: (partialThinking: string) => void;
   /** Called once when the first byte of any kind arrives (model finished loading). */
   onFirstByte?: () => void;
+  /** Receives the runtime's own token counts and timings once the stream ends (when it reports any). */
+  onStats?: (stats: GenerationStats) => void;
   /** Override timeouts (primarily for tests). */
   firstByteTimeoutMs?: number;
   idleTimeoutMs?: number;
@@ -328,6 +334,16 @@ export const THINKING_TOKEN_HEADROOM = 4096;
 export function thinkingHeadroom(config: Pick<LocalRuntimeConfig, 'reasoning'>): number {
   return config.reasoning === 'off' ? 0 : THINKING_TOKEN_HEADROOM;
 }
+/**
+ * Ollama `keep_alive` value for a configured number of minutes. undefined keeps Ollama's default
+ * (5 minutes); 0 unloads the model right after the reply.
+ */
+export function keepAliveValue(minutes?: number): string | number | undefined {
+  if (minutes === undefined || !Number.isFinite(minutes)) return undefined;
+  if (minutes <= 0) return 0;
+  return `${Math.round(minutes)}m`;
+}
+
 const FIRST_BYTE_TIMEOUT_MS = 5 * 60_000; // cold model load can be slow on CPU / low RAM
 const IDLE_TIMEOUT_MS = 90_000;
 
@@ -343,6 +359,7 @@ export async function streamLocalGemmaChat({
   onToken,
   onThinking,
   onFirstByte,
+  onStats,
   firstByteTimeoutMs = FIRST_BYTE_TIMEOUT_MS,
   idleTimeoutMs = IDLE_TIMEOUT_MS,
 }: StreamGemmaOptions): Promise<string> {
@@ -361,6 +378,10 @@ export async function streamLocalGemmaChat({
           stream: true,
           // Ollama only: skip the reasoning phase entirely (much faster on CPU-only machines).
           ...(config.reasoning === 'off' ? { think: false } : {}),
+          // Keep the model (and its prompt cache) resident between questions.
+          ...(keepAliveValue(config.keepAliveMinutes) !== undefined
+            ? { keep_alive: keepAliveValue(config.keepAliveMinutes) }
+            : {}),
           options: {
             temperature: config.temperature,
             num_predict: maxTokens,
@@ -373,6 +394,8 @@ export async function streamLocalGemmaChat({
           stream: true,
           temperature: config.temperature,
           max_tokens: maxTokens,
+          // Ask for token counts in the final chunk (servers that do not know the field ignore it).
+          stream_options: { include_usage: true },
         };
 
   // Watchdog: abort (with a readable error) if the runtime goes silent instead of hanging forever.
@@ -447,6 +470,14 @@ export async function streamLocalGemmaChat({
     let thinking = '';
     let doneReason = '';
     let gotFirstByte = false;
+    const stats: GenerationStats = {};
+    const streamStartedAt = Date.now();
+    const num = (v: unknown): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined;
+    const nsToMs = (v: unknown): number | undefined => {
+      const n = num(v);
+      return n === undefined ? undefined : Math.round(n / 1e6);
+    };
 
     const processLine = (rawLine: string) => {
       const line = rawLine.trim();
@@ -458,9 +489,22 @@ export async function streamLocalGemmaChat({
             message?: { content?: string; thinking?: string };
             error?: string;
             done_reason?: string;
+            prompt_eval_count?: number;
+            eval_count?: number;
+            load_duration?: number;
+            prompt_eval_duration?: number;
+            eval_duration?: number;
           };
           if (parsed.error) throw new Error(parsed.error);
           if (parsed.done_reason) doneReason = parsed.done_reason;
+          const evalMs = nsToMs(parsed.eval_duration);
+          stats.promptTokens = num(parsed.prompt_eval_count) ?? stats.promptTokens;
+          stats.completionTokens = num(parsed.eval_count) ?? stats.completionTokens;
+          stats.loadMs = nsToMs(parsed.load_duration) ?? stats.loadMs;
+          stats.promptEvalMs = nsToMs(parsed.prompt_eval_duration) ?? stats.promptEvalMs;
+          if (stats.completionTokens && evalMs) {
+            stats.tokensPerSecond = Math.round((stats.completionTokens / (evalMs / 1000)) * 10) / 10;
+          }
           if (parsed.message?.thinking) {
             thinking += parsed.message.thinking;
             onThinking?.(thinking);
@@ -485,10 +529,23 @@ export async function streamLocalGemmaChat({
               finish_reason?: string | null;
             }>;
             error?: { message?: string };
+            usage?: { prompt_tokens?: number; completion_tokens?: number };
+            timings?: {
+              prompt_n?: number;
+              prompt_ms?: number;
+              predicted_n?: number;
+              predicted_per_second?: number;
+            };
           };
           if (parsed.error?.message) {
             throw new Error(parsed.error.message);
           }
+          stats.promptTokens = num(parsed.usage?.prompt_tokens) ?? num(parsed.timings?.prompt_n) ?? stats.promptTokens;
+          stats.completionTokens =
+            num(parsed.usage?.completion_tokens) ?? num(parsed.timings?.predicted_n) ?? stats.completionTokens;
+          stats.promptEvalMs = num(parsed.timings?.prompt_ms) ?? stats.promptEvalMs;
+          const pps = num(parsed.timings?.predicted_per_second);
+          if (pps) stats.tokensPerSecond = Math.round(pps * 10) / 10;
           const reasoning =
             parsed.choices?.[0]?.delta?.reasoning_content ?? parsed.choices?.[0]?.delta?.reasoning;
           if (reasoning) {
@@ -530,6 +587,15 @@ export async function streamLocalGemmaChat({
       processLine(buffer);
     }
 
+    if (stats.promptTokens !== undefined || stats.completionTokens !== undefined) {
+      // Runtimes that only report counts (no eval timings): derive speed from wall-clock time.
+      if (stats.tokensPerSecond === undefined && stats.completionTokens) {
+        const seconds = (Date.now() - streamStartedAt - (stats.loadMs ?? 0) - (stats.promptEvalMs ?? 0)) / 1000;
+        if (seconds > 0.2) stats.tokensPerSecond = Math.round((stats.completionTokens / seconds) * 10) / 10;
+      }
+      onStats?.(stats);
+    }
+
     if (!accumulated.trim() && thinking.trim()) {
       if (doneReason === 'length' || !doneReason) {
         throw new Error(
@@ -559,82 +625,4 @@ export async function streamLocalGemmaChat({
     clearTimeout(timer);
     externalSignal.removeEventListener('abort', onExternalAbort);
   }
-}
-
-export interface BuiltGemmaPayload {
-  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
-  truncated: boolean;
-}
-
-const DEFAULT_MAX_CONTEXT_CHARS = 24_000;
-
-export function buildGemmaMessages(
-  systemPrompt: string,
-  history: ChatMessage[],
-  contextBlocks: Array<{ title: string; kind: string; content: string }>,
-  budget?: number | { contextTokens?: number; reserveForReply?: number }
-): BuiltGemmaPayload {
-  let maxChars = DEFAULT_MAX_CONTEXT_CHARS;
-  if (typeof budget === 'number') {
-    maxChars = Math.max(2000, budget);
-  } else if (budget && typeof budget === 'object') {
-    const ctxTokens = budget.contextTokens ?? 8192;
-    const reserve = budget.reserveForReply ?? 2048;
-    const usableTokens = Math.max(1024, ctxTokens - reserve);
-    maxChars = Math.max(4000, Math.floor(usableTokens * 3.2));
-  }
-
-  let truncated = false;
-  const maxContextChars = Math.floor(maxChars * 0.55);
-
-  let contextText = '';
-  if (contextBlocks.length > 0) {
-    const parts: string[] = [];
-    let used = 0;
-    for (const block of contextBlocks) {
-      const formatted = `--- ${block.kind.toUpperCase()}: ${block.title} ---\n${block.content}`;
-      if (used + formatted.length <= maxContextChars) {
-        parts.push(formatted);
-        used += formatted.length;
-      } else {
-        const remaining = Math.max(200, maxContextChars - used);
-        parts.push(`${formatted.slice(0, remaining)}\n...[truncated to fit local context window]`);
-        truncated = true;
-        break;
-      }
-    }
-    contextText = `\n\nAttached Local Vault Context:\n${parts.join('\n\n')}`;
-  }
-
-  const systemMessage = {
-    role: 'system' as const,
-    content: `${systemPrompt}${contextText}`,
-  };
-
-  let remainingBudget = Math.max(2000, maxChars - systemMessage.content.length);
-  const selectedHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
-
-  // Keep the most recent turns within the character budget; skip stale empty assistant placeholders.
-  const recentSlice = history.slice(-16);
-  for (let i = recentSlice.length - 1; i >= 0; i--) {
-    const msg = recentSlice[i];
-    if (msg.role === 'assistant' && !msg.content.trim()) continue;
-    if (msg.content.length <= remainingBudget || selectedHistory.length === 0) {
-      const content =
-        msg.content.length <= remainingBudget
-          ? msg.content
-          : `${msg.content.slice(0, remainingBudget)}\n...[trimmed]`;
-      if (content.length < msg.content.length) truncated = true;
-      selectedHistory.unshift({ role: msg.role, content });
-      remainingBudget -= content.length;
-    } else {
-      truncated = true;
-      break;
-    }
-  }
-
-  return {
-    messages: [systemMessage, ...selectedHistory],
-    truncated,
-  };
 }

@@ -117,7 +117,13 @@ test('Context budget builder supports token-window options and trims oversized a
 
   assert.equal(built.truncated, true);
   assert.equal(built.messages[0].role, 'system');
-  assert.equal(built.messages[built.messages.length - 1].content, 'Fix line 10');
+  // Attachments ride on the latest user message (keeps the system prompt, and so the runtime's
+  // prompt cache, stable); the request itself is always last.
+  assert.equal(built.messages[0].content, 'You are a local coder.');
+  const lastMessage = built.messages[built.messages.length - 1];
+  assert.equal(lastMessage.role, 'user');
+  assert.ok(lastMessage.content.endsWith('Fix line 10'));
+  assert.ok(lastMessage.content.includes('[truncated to fit local context window]'));
 
   // Reserving reply + thinking headroom on an 8192 window keeps system prompt + latest user turn
   // while skipping stale empty assistant placeholders.

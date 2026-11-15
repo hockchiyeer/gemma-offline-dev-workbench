@@ -346,6 +346,55 @@ export const LocalGemmaSetupModal: React.FC<LocalGemmaSetupModalProps> = ({
             </select>
           </div>
 
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label
+                htmlFor="runtime-keep-alive"
+                className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+              >
+                Keep model loaded (minutes, Ollama)
+              </label>
+              <input
+                id="runtime-keep-alive"
+                type="number"
+                min={0}
+                max={1440}
+                step={5}
+                value={draft.keepAliveMinutes ?? 30}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    keepAliveMinutes: Math.min(1440, Math.max(0, Math.round(Number(e.target.value) || 0))),
+                  })
+                }
+                className="mt-1.5 min-h-[44px] w-full rounded-xl border border-slate-300 bg-slate-50 px-3.5 font-mono text-xs tabular-nums text-slate-900 outline-none focus:border-teal-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+              />
+              <p className="mt-1 text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+                A loaded model answers follow-ups much faster. 0 unloads right after each reply.
+              </p>
+            </div>
+
+            <label
+              htmlFor="runtime-auto-compact"
+              className="flex min-h-[44px] cursor-pointer items-start gap-2.5 self-start rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
+            >
+              <input
+                id="runtime-auto-compact"
+                type="checkbox"
+                checked={draft.autoCompact !== false}
+                onChange={(e) => setDraft({ ...draft, autoCompact: e.target.checked })}
+                className="mt-0.5 h-4 w-4 shrink-0 accent-teal-600"
+              />
+              <span>
+                <span className="font-medium">Condense long chats</span>
+                <span className="mt-0.5 block text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+                  Summarise the oldest turns with the local model instead of dropping them when a chat outgrows the
+                  context window.
+                </span>
+              </span>
+            </label>
+          </div>
+
           <div>
             <label
               htmlFor="runtime-system-prompt"
