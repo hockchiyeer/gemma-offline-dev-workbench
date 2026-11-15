@@ -42,6 +42,7 @@ import type {
   SnippetActionKind,
   SupportedLanguage,
 } from '../types/vault';
+import { ChatThreadJumpRail, extractConversationTurns } from './ChatThreadJumpRail';
 import { CodeBlock } from './CodeBlock';
 import { ContextBar } from './ContextBar';
 import { useConfirm } from './ConfirmDialog';
@@ -146,10 +147,16 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   const [contextTrimmed, setContextTrimmed] = useState(false);
   const [compacting, setCompacting] = useState(false);
   const [expandedAttachmentKeys, setExpandedAttachmentKeys] = useState<Record<string, boolean>>({});
+  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  const [highlightedTurnId, setHighlightedTurnId] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const latestDraftRef = useRef<string>('');
   const latestThinkingRef = useRef<string>('');
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const messageRefs = useRef<Record<string, HTMLElement | null>>({});
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollRafRef = useRef<number | null>(null);
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
 
   const activeSession = useMemo(
@@ -157,13 +164,24 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     [sessions, activeSessionId]
   );
 
+  const conversationTurns = useMemo(
+    () => extractConversationTurns(activeSession?.messages || []),
+    [activeSession?.messages]
+  );
+
   // Stop any in-flight local stream if the pane unmounts (e.g. vault auto-lock) so a late
   // completion can never write decrypted chat content after the key has been cleared.
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    setActiveTurnId(conversationTurns[conversationTurns.length - 1]?.id || null);
+  }, [activeSession?.id, conversationTurns]);
 
   // Elapsed-time ticker so a slow cold start is visible instead of looking frozen.
   useEffect(() => {
@@ -193,6 +211,42 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       ...prev,
       [key]: !prev[key],
     }));
+  };
+
+  const handleChatScroll = () => {
+    if (scrollRafRef.current !== null || conversationTurns.length === 0) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      const containerTop = container.getBoundingClientRect().top;
+      const threshold = containerTop + Math.min(220, container.clientHeight * 0.35);
+      let current = conversationTurns[0].id;
+      for (const turn of conversationTurns) {
+        const el = messageRefs.current[turn.id];
+        if (!el) continue;
+        if (el.getBoundingClientRect().top <= threshold) {
+          current = turn.id;
+        } else {
+          break;
+        }
+      }
+      setActiveTurnId((prev) => (prev === current ? prev : current));
+    });
+  };
+
+  const handleJumpToTurn = (messageId: string) => {
+    setActiveTurnId(messageId);
+    const el = messageRefs.current[messageId];
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    setHighlightedTurnId(messageId);
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = setTimeout(() => {
+      setHighlightedTurnId((curr) => (curr === messageId ? null : curr));
+      highlightTimerRef.current = null;
+    }, 1500);
   };
 
   const toggleAttachment = (ref: ChatAttachmentRef) => {
@@ -659,65 +713,75 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         </div>
       </div>
 
-      {/* Chat Feed */}
-      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
-        <div className="mx-auto max-w-3xl space-y-5">
-          {!probe.connected && (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900/70">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
-                    Connect Your Local Google Gemma Model
-                  </h3>
-                  <p className="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-400">
-                    Run free open-weight Gemma 4, Gemma 3n, Gemma 3, or CodeGemma completely offline via Ollama (<code className="font-mono">127.0.0.1:11434</code>) or llama.cpp / LM Studio (<code className="font-mono">127.0.0.1:1234</code>).
-                  </p>
+      {/* Chat Feed + DeepSeek-style Right-Edge Jump Chip */}
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleChatScroll}
+          className="flex-1 overflow-y-auto px-4 py-5 pr-7 sm:px-6 sm:pr-9"
+        >
+          <div className="mx-auto max-w-3xl space-y-5">
+            {!probe.connected && (
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900/70">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
+                      Connect Your Local Google Gemma Model
+                    </h3>
+                    <p className="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+                      Run free open-weight Gemma 4, Gemma 3n, Gemma 3, or CodeGemma completely offline via Ollama (<code className="font-mono">127.0.0.1:11434</code>) or llama.cpp / LM Studio (<code className="font-mono">127.0.0.1:1234</code>).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onOpenRuntimeModal}
+                    className="min-h-[38px] rounded-lg bg-teal-600 px-3.5 text-xs font-medium text-white hover:bg-teal-500 whitespace-nowrap shrink-0"
+                  >
+                    Configure Runtime
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={onOpenRuntimeModal}
-                  className="min-h-[38px] rounded-lg bg-teal-600 px-3.5 text-xs font-medium text-white hover:bg-teal-500 whitespace-nowrap shrink-0"
+                <div className="mt-3 overflow-x-auto rounded-xl bg-slate-100 px-3.5 py-2.5 font-mono text-xs text-slate-800 dark:bg-slate-950 dark:text-slate-200">
+                  npm run setup:gemma
+                </div>
+                <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                  Safe to re-run: it skips Ollama and any model you already have, and only downloads what is missing.
+                </p>
+              </div>
+            )}
+
+            {contextTrimmed && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-800 dark:text-amber-300">
+                Attached context or older turns were trimmed to fit the local Gemma context window budget.
+              </div>
+            )}
+
+            {activeSession?.messages.map((msg, msgIndex) => {
+              const isStreamingThis = streamingDraft && streamingDraft.msgId === msg.id;
+              const displayContent = isStreamingThis ? streamingDraft.text : msg.content;
+              const displayThinking = isStreamingThis ? thinkingText : msg.thinking || '';
+              const precedingUser =
+                msg.role === 'assistant' && msgIndex > 0
+                  ? activeSession.messages[msgIndex - 1]
+                  : undefined;
+              const turnParentSnippetId = precedingUser?.attachments?.find(
+                (a) => a.kind === 'snippet'
+              )?.id;
+              const turnActionKind = precedingUser?.actionKind;
+              const isJumpedHighlight = highlightedTurnId === msg.id;
+
+              return (
+                <article
+                  key={msg.id}
+                  id={`chat-msg-${msg.id}`}
+                  ref={(el) => {
+                    messageRefs.current[msg.id] = el;
+                  }}
+                  className={`scroll-mt-4 rounded-2xl border p-4 transition-shadow sm:p-5 ${
+                    msg.role === 'user'
+                      ? 'ml-auto max-w-[92%] border-teal-600/25 bg-teal-50/60 dark:border-teal-500/20 dark:bg-teal-950/20'
+                      : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/70'
+                  } ${isJumpedHighlight ? 'ring-2 ring-teal-500/70 ring-offset-2 ring-offset-slate-50 dark:ring-offset-[#0B1120]' : ''}`}
                 >
-                  Configure Runtime
-                </button>
-              </div>
-              <div className="mt-3 overflow-x-auto rounded-xl bg-slate-100 px-3.5 py-2.5 font-mono text-xs text-slate-800 dark:bg-slate-950 dark:text-slate-200">
-                npm run setup:gemma
-              </div>
-              <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
-                Safe to re-run: it skips Ollama and any model you already have, and only downloads what is missing.
-              </p>
-            </div>
-          )}
-
-          {contextTrimmed && (
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-800 dark:text-amber-300">
-              Attached context or older turns were trimmed to fit the local Gemma context window budget.
-            </div>
-          )}
-
-          {activeSession?.messages.map((msg, msgIndex) => {
-            const isStreamingThis = streamingDraft && streamingDraft.msgId === msg.id;
-            const displayContent = isStreamingThis ? streamingDraft.text : msg.content;
-            const displayThinking = isStreamingThis ? thinkingText : msg.thinking || '';
-            const precedingUser =
-              msg.role === 'assistant' && msgIndex > 0
-                ? activeSession.messages[msgIndex - 1]
-                : undefined;
-            const turnParentSnippetId = precedingUser?.attachments?.find(
-              (a) => a.kind === 'snippet'
-            )?.id;
-            const turnActionKind = precedingUser?.actionKind;
-
-            return (
-              <article
-                key={msg.id}
-                className={`rounded-2xl border p-4 sm:p-5 ${
-                  msg.role === 'user'
-                    ? 'ml-auto max-w-[92%] border-teal-600/25 bg-teal-50/60 dark:border-teal-500/20 dark:bg-teal-950/20'
-                    : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/70'
-                }`}
-              >
                 <div className="mb-2 flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
                   <span className="font-medium text-slate-800 dark:text-slate-200">
                     {msg.role === 'user' ? 'Developer' : msg.model || runtimeConfig.selectedModel}
@@ -1113,8 +1177,15 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             </div>
           )}
 
-          <div ref={scrollEndRef} />
+            <div ref={scrollEndRef} />
+          </div>
         </div>
+
+        <ChatThreadJumpRail
+          turns={conversationTurns}
+          activeTurnId={activeTurnId}
+          onJumpToTurn={handleJumpToTurn}
+        />
       </div>
 
       {/* Composer */}
