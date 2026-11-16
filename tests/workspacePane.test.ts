@@ -24,17 +24,22 @@ let ollamaBase = '';
 const chatCalls: ChatCall[] = [];
 const realFetch = globalThis.fetch;
 
-let browseHandler: (initialDir?: string) => Promise<{ supported: boolean; cancelled: boolean; path: string | null }> = async () => ({
+let browseHandler: (
+  initialDir?: string,
+  signal?: AbortSignal
+) => Promise<{ supported: boolean; cancelled: boolean; path: string | null }> = async () => ({
   supported: false,
   cancelled: false,
   path: null,
 });
+let cancelBrowseHandler: () => boolean = () => false;
 
 before(async () => {
   appServer = http.createServer(
     createApp({
       workspaceManager: createWorkspaceManager({
-        pickFolder: (initialDir) => browseHandler(initialDir),
+        pickFolder: (initialDir, signal) => browseHandler(initialDir, signal),
+        cancelFolder: () => cancelBrowseHandler(),
       }),
       allowWorkspace: true,
     })
@@ -301,7 +306,7 @@ test('open a folder, @-mention a file, ask a question: the model receives the fi
   }
 });
 
-test('Browse… populates and persists the directory path until manually altered or replaced via Browse…', async () => {
+test('Browse… populates and persists the directory path until manually altered or replaced via Browse…, and blur loads typed paths without an Open button', async () => {
   const root = await makeProject();
   const root2 = await makeProject();
   let m = await mount(baseSession());
@@ -314,6 +319,11 @@ test('Browse… populates and persists the directory path until manually altered
 
     let input = m.container.querySelector('input[type="text"][list]') as HTMLInputElement;
     assert.ok(input, 'path input is visible');
+    assert.equal(
+      [...m.container.querySelectorAll('button')].some((b) => textOf(b) === 'Open'),
+      false,
+      'redundant Open button should not be shown'
+    );
     const browseBtn = button(m.container, 'Browse…');
     assert.ok(browseBtn, 'Browse button is visible when server is available');
 
@@ -323,20 +333,45 @@ test('Browse… populates and persists the directory path until manually altered
     await waitUntil(() => input.value === '/nonexistent/workspace/dir', 'path field populated with invalid path');
     await waitUntil(() => Boolean(m.container.querySelector('[role="alert"]')), 'open error shown');
 
-    // Now pick a real repository directory: Browse… populates the path input and loads the workspace immediately.
-    browseHandler = async () => ({ supported: true, cancelled: false, path: root });
-    await act(async () => button(m.container, 'Browse…')!.click());
-    await waitUntil(() => m.sessions()[0].workspace?.path === root, 'workspace opened via Browse…');
-    await waitUntil(() => /9 files/.test(textOf(m.container)), 'repository file count shown');
+    // Clicking Cancel suppresses blur-open and closes the form without opening.
+    const cancelBtn = button(m.container, 'Cancel')!;
+    await act(async () => {
+      cancelBtn.dispatchEvent(new domWindow.MouseEvent('mousedown', { bubbles: true }) as unknown as Event);
+      input.dispatchEvent(
+        new domWindow.FocusEvent('focusout', { bubbles: true, relatedTarget: cancelBtn as never }) as unknown as Event
+      );
+      cancelBtn.click();
+    });
+    assert.equal(m.sessions()[0].workspace, undefined, 'Cancel must not trigger blur-open');
+    await waitUntil(() => !!button(m.container, 'Open project folder'), 'Open project folder button returned after Cancel');
 
-    // Disconnect workspace and reopen form: persisted path from Browse… remains populated.
+    // Reopen form, type/paste a valid path and shift focus away (blur): loads repository without clicking Open.
+    await act(async () => button(m.container, 'Open project folder')!.click());
+    input = m.container.querySelector('input[type="text"][list]') as HTMLInputElement;
+    await act(async () => typeInto(input, root2));
+    await act(async () => {
+      const outside = m.container.querySelector('textarea');
+      input.dispatchEvent(
+        new domWindow.FocusEvent('focusout', { bubbles: true, relatedTarget: outside as never }) as unknown as Event
+      );
+    });
+    await waitUntil(() => m.sessions()[0].workspace?.path === root2, 'blur loads typed/pasted directory path');
+    await waitUntil(() => /9 files/.test(textOf(m.container)), 'repository file count shown after blur');
+
+    // Disconnect workspace and reopen form: persisted path remains populated.
     await act(async () => button(m.container, /Close project folder/)!.click());
     await waitUntil(() => !!button(m.container, 'Open project folder'), 'Open project folder button returns');
     await act(async () => button(m.container, 'Open project folder')!.click());
     input = m.container.querySelector('input[type="text"][list]') as HTMLInputElement;
-    assert.equal(input.value, root, 'persisted Browse… path stays populated after disconnecting');
+    assert.equal(input.value, root2, 'persisted path stays populated after disconnecting');
 
-    // Unmount and remount (page reload / new session): persisted path is still restored.
+    // Now pick a different directory via Browse…: updates path input, persists, and loads immediately.
+    browseHandler = async () => ({ supported: true, cancelled: false, path: root });
+    await act(async () => button(m.container, 'Browse…')!.click());
+    await waitUntil(() => m.sessions()[0].workspace?.path === root, 'workspace opened via Browse…');
+    assert.equal(domWindow.localStorage.getItem('gemmavault_last_workspace_path'), root);
+
+    // Unmount and remount (page reload / new session): persisted Browse… path is still restored.
     await m.unmount();
     m = await mount(baseSession());
     await waitUntil(() => !!button(m.container, 'Open project folder'), 'Open project folder after remount');
@@ -344,7 +379,7 @@ test('Browse… populates and persists the directory path until manually altered
     input = m.container.querySelector('input[type="text"][list]') as HTMLInputElement;
     assert.equal(input.value, root, 'persisted Browse… path survives reload/remount');
 
-    // Manual edit alters the persisted path.
+    // Manual edit alters the persisted path without requiring blur when just saved, and stays across remount.
     await act(async () => typeInto(input, '/manual/custom/path'));
     assert.equal(domWindow.localStorage.getItem('gemmavault_last_workspace_path'), '/manual/custom/path');
     await m.unmount();
@@ -353,14 +388,57 @@ test('Browse… populates and persists the directory path until manually altered
     await act(async () => button(m.container, 'Open project folder')!.click());
     input = m.container.querySelector('input[type="text"][list]') as HTMLInputElement;
     assert.equal(input.value, '/manual/custom/path', 'manually altered path persists until changed again');
-
-    // Choosing a different directory via Browse… updates the persisted path and opens the new directory.
-    browseHandler = async () => ({ supported: true, cancelled: false, path: root2 });
-    await act(async () => button(m.container, 'Browse…')!.click());
-    await waitUntil(() => m.sessions()[0].workspace?.path === root2, 'new workspace opened via Browse…');
-    assert.equal(domWindow.localStorage.getItem('gemmavault_last_workspace_path'), root2);
   } finally {
     browseHandler = async () => ({ supported: false, cancelled: false, path: null });
+    cancelBrowseHandler = () => false;
+    domWindow.localStorage.removeItem('gemmavault_last_workspace_path');
+    await m.unmount();
+  }
+});
+
+test('Cancel while Browse dialog is open closes the popup and resets the Browse button state', async () => {
+  const root = await makeProject();
+  let cancelCalls = 0;
+  let resolvePending: ((v: { supported: boolean; cancelled: boolean; path: string | null }) => void) | null = null;
+  const m = await mount(baseSession());
+  try {
+    await waitUntil(() => !!button(m.container, 'Open project folder'), 'Open project folder button');
+    await act(async () => button(m.container, 'Open project folder')!.click());
+
+    cancelBrowseHandler = () => {
+      cancelCalls += 1;
+      resolvePending?.({ supported: true, cancelled: true, path: null });
+      resolvePending = null;
+      return true;
+    };
+    browseHandler = (_initialDir, signal) =>
+      new Promise((resolve) => {
+        resolvePending = resolve;
+        signal?.addEventListener('abort', () => {
+          resolve({ supported: true, cancelled: true, path: null });
+        });
+      });
+
+    await act(async () => button(m.container, 'Browse…')!.click());
+    await waitUntil(() => !!button(m.container, 'Choosing folder…'), 'Choosing folder… spinner shown');
+
+    const cancelBtn = button(m.container, 'Cancel')!;
+    assert.equal(cancelBtn.disabled, false, 'Cancel must stay enabled while folder dialog is open');
+
+    await act(async () => cancelBtn.click());
+    await waitUntil(() => !!button(m.container, 'Browse…'), 'Browse… button reset after Cancel');
+    await waitUntil(() => cancelCalls >= 1, 'server browse-cancel invoked');
+    assert.equal(button(m.container, 'Browse…')!.disabled, false, 'Browse… button is clickable again');
+    assert.equal(m.container.querySelector('[role="alert"]'), null, 'cancelling browse does not show an error');
+    assert.equal(m.sessions()[0].workspace, undefined, 'no workspace opened on cancel');
+
+    // Subsequent Browse… opens a fresh folder cleanly; clicking Cancel while idle closes the form.
+    browseHandler = async () => ({ supported: true, cancelled: false, path: root });
+    await act(async () => button(m.container, 'Browse…')!.click());
+    await waitUntil(() => m.sessions()[0].workspace?.path === root, 'Browse… works normally after cancel reset');
+  } finally {
+    browseHandler = async () => ({ supported: false, cancelled: false, path: null });
+    cancelBrowseHandler = () => false;
     domWindow.localStorage.removeItem('gemmavault_last_workspace_path');
     await m.unmount();
   }

@@ -9,7 +9,7 @@ import type {
 import {
   dotProduct, embedTexts, isLoopbackHttpUrl, scorePath, vecKey,
 } from '../../src/lib/workspaceCore.ts';
-import { pickNativeFolder } from './browse.ts';
+import { cancelNativeFolderBrowse, pickNativeFolder } from './browse.ts';
 import {
   LIMITS, applyIncrementalChanges, bm25Search, buildBm25, fuseRanks, renderRepoMap, scanWorkspace,
   type Bm25Index, type Chunk, type ScanResult,
@@ -45,7 +45,9 @@ export interface WorkspaceManagerOptions {
   /** Debounce delay in ms before flushing file watcher events (defaults to 120). */
   watchDebounceMs?: number;
   /** Native OS folder picker override (used by tests). */
-  pickFolder?: (initialDir?: string) => Promise<BrowseWorkspaceResult>;
+  pickFolder?: (initialDir?: string, signal?: AbortSignal) => Promise<BrowseWorkspaceResult>;
+  /** Cancel an active OS folder picker override (used by tests). */
+  cancelFolder?: () => boolean;
 }
 
 export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
@@ -54,6 +56,7 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
   const watchEnabled = options.watch !== false;
   const watchDebounceMs = Math.max(20, options.watchDebounceMs ?? 120);
   const doPickFolder = options.pickFolder ?? pickNativeFolder;
+  const doCancelFolder = options.cancelFolder ?? cancelNativeFolderBrowse;
   const states = new Map<string, WorkspaceState>();
 
   const stopWatcher = (st: WorkspaceState) => {
@@ -228,14 +231,17 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
   }
 
   return {
-    async browse(initialDir?: string): Promise<BrowseWorkspaceResult> {
-      const res = await doPickFolder(initialDir);
+    async browse(initialDir?: string, signal?: AbortSignal): Promise<BrowseWorkspaceResult> {
+      const res = await doPickFolder(initialDir, signal);
       if (!res.supported || res.cancelled || !res.path) return res;
       try {
         return { supported: true, cancelled: false, path: resolveRoot(res.path) };
       } catch {
         return { supported: true, cancelled: false, path: res.path };
       }
+    },
+    cancelBrowse(): { cancelled: boolean } {
+      return { cancelled: doCancelFolder() };
     },
 
     async open(rawPath: string, embedding?: EmbeddingSetting | null): Promise<WorkspaceInfo> {

@@ -62,13 +62,35 @@ export async function browseServerWorkspace(
     }
   }
   if (!res.ok) {
-    const msg =
+    const rawMsg =
       parsed && typeof parsed === 'object' && typeof (parsed as { error?: unknown }).error === 'string'
         ? (parsed as { error: string }).error
         : `Folder picker failed (HTTP ${res.status})`;
-    throw new Error(msg);
+    if (res.status === 404 && /unknown workspace operation/i.test(rawMsg)) {
+      throw new Error(
+        'Folder browsing requires restarting the local server (re-run npm start or npm run dev), or paste the folder path above.'
+      );
+    }
+    throw new Error(rawMsg);
   }
   return parsed as BrowseWorkspaceResult;
+}
+
+export async function cancelServerWorkspaceBrowse(): Promise<{ cancelled: boolean }> {
+  try {
+    const res = await fetch('/api/workspace/browse-cancel', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GemmaVault-Workspace': '1',
+      },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) return { cancelled: false };
+    return (await res.json()) as { cancelled: boolean };
+  } catch {
+    return { cancelled: false };
+  }
 }
 
 const LAST_WORKSPACE_PATH_KEY = 'gemmavault_last_workspace_path';

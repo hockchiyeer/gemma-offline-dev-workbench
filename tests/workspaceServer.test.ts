@@ -246,7 +246,7 @@ test('Express /api/workspace routes enforce CSRF header and allowWorkspace flag'
   try {
     const statusRes = await fetch(`http://127.0.0.1:${port}/api/workspace/status`);
     assert.equal(statusRes.status, 200);
-    assert.deepEqual(await statusRes.json(), { available: false });
+    assert.deepEqual(await statusRes.json(), { available: false, browse: false });
 
     const blockedOp = await fetch(`http://127.0.0.1:${port}/api/workspace/open`, {
       method: 'POST',
@@ -336,8 +336,77 @@ test('POST /api/workspace/browse enforces guards, resolves picked paths, and han
       body: JSON.stringify({}),
     });
     assert.deepEqual(await unsupRes.json(), { supported: false, cancelled: false, path: null });
+
+    // Missing CSRF header rejected on browse-cancel
+    const unauthCancel = await fetch(`http://127.0.0.1:${port}/api/workspace/browse-cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(unauthCancel.status, 400);
   } finally {
     await mgr.closeAll();
     await new Promise<void>((r) => server.close(() => r()));
+  }
+
+  // Verify browse-cancel and HTTP abort cancel an in-flight picker cleanly
+  let cancelCalled = 0;
+  let releasePicker: (() => void) | null = null;
+  let observedSignalAborted = false;
+  const pendingMgr = createWorkspaceManager({
+    watch: false,
+    pickFolder: (_initialDir, signal) =>
+      new Promise((resolve) => {
+        signal?.addEventListener('abort', () => {
+          observedSignalAborted = true;
+          resolve({ supported: true, cancelled: true, path: null });
+        });
+        releasePicker = () => resolve({ supported: true, cancelled: true, path: null });
+      }),
+    cancelFolder: () => {
+      cancelCalled += 1;
+      releasePicker?.();
+      return true;
+    },
+  });
+  const server2 = http.createServer(createApp({ allowWorkspace: true, workspaceManager: pendingMgr }));
+  await new Promise<void>((r) => server2.listen(0, '127.0.0.1', r));
+  const port2 = (server2.address() as { port: number }).port;
+  try {
+    const abortCtrl = new AbortController();
+    const pendingFetch = fetch(`http://127.0.0.1:${port2}/api/workspace/browse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GemmaVault-Workspace': '1' },
+      body: JSON.stringify({}),
+      signal: abortCtrl.signal,
+    }).catch(() => null);
+
+    await new Promise((r) => setTimeout(r, 30));
+    const cancelRes = await fetch(`http://127.0.0.1:${port2}/api/workspace/browse-cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GemmaVault-Workspace': '1' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(cancelRes.status, 200);
+    assert.deepEqual(await cancelRes.json(), { cancelled: true });
+    assert.equal(cancelCalled, 1);
+    await pendingFetch;
+
+    // Also verify HTTP client abort triggers server signal abort
+    const abortCtrl2 = new AbortController();
+    const pendingFetch2 = fetch(`http://127.0.0.1:${port2}/api/workspace/browse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GemmaVault-Workspace': '1' },
+      body: JSON.stringify({}),
+      signal: abortCtrl2.signal,
+    }).catch(() => null);
+    await new Promise((r) => setTimeout(r, 30));
+    abortCtrl2.abort();
+    await pendingFetch2;
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(observedSignalAborted, true);
+  } finally {
+    await pendingMgr.closeAll();
+    await new Promise<void>((r) => server2.close(() => r()));
   }
 });

@@ -202,20 +202,30 @@ export function createApp(options: CreateAppOptions = {}) {
   };
 
   app.get('/api/workspace/status', (_req, res) => {
-    res.json({ available: allowWorkspace });
+    res.json({ available: allowWorkspace, browse: allowWorkspace });
   });
 
   app.post('/api/workspace/:op', workspaceGuard, async (req, res) => {
+    const controller = new AbortController();
+    const onClose = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    res.on('close', onClose);
     try {
       const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
-      const result = await handleWorkspaceOp(workspaceManager, String(req.params.op || ''), body);
-      res.json(result);
+      const result = await handleWorkspaceOp(workspaceManager, String(req.params.op || ''), body, controller.signal);
+      if (!res.writableEnded && !controller.signal.aborted) {
+        res.json(result);
+      }
     } catch (err) {
+      if (res.writableEnded || controller.signal.aborted) return;
       if (err instanceof WorkspaceError) {
         res.status(err.status).json({ error: err.message });
         return;
       }
       res.status(500).json({ error: err instanceof Error ? err.message : 'Workspace operation failed.' });
+    } finally {
+      res.off('close', onClose);
     }
   });
 

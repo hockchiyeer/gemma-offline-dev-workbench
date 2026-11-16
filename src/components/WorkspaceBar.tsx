@@ -35,7 +35,8 @@ interface WorkspaceBarProps {
   excluded: Set<string>;
   busy: boolean;
   onOpen: (path: string) => void;
-  onBrowseServer?: (initialDir?: string) => Promise<BrowseWorkspaceResult>;
+  onBrowseServer?: (initialDir?: string, signal?: AbortSignal) => Promise<BrowseWorkspaceResult>;
+  onCancelBrowseServer?: () => Promise<void> | void;
   onPickBrowser?: () => void;
   onPickBrowserFiles?: (files: FileList) => void;
   onReconnectBrowser?: () => void;
@@ -65,6 +66,7 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   busy,
   onOpen,
   onBrowseServer,
+  onCancelBrowseServer,
   onPickBrowser,
   onPickBrowserFiles,
   onReconnectBrowser,
@@ -79,11 +81,26 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   const [serverBrowseSupported, setServerBrowseSupported] = useState(true);
   const datalistId = useId();
   const dirInputRef = useRef<HTMLInputElement | null>(null);
+  const browseBtnRef = useRef<HTMLButtonElement | null>(null);
+  const cancelBtnRef = useRef<HTMLButtonElement | null>(null);
   const userEditedPathRef = useRef(false);
+  const pathDraftRef = useRef(pathDraft);
+  const suppressBlurOpenRef = useRef(false);
+  const lastAttemptedPathRef = useRef<string | null>(null);
+  const browseAbortRef = useRef<AbortController | null>(null);
+  const browseCancelledRef = useRef(false);
+  pathDraftRef.current = pathDraft;
 
   useEffect(() => {
     setServerBrowseSupported(true);
   }, [serverAvailable]);
+
+  useEffect(() => {
+    return () => {
+      browseAbortRef.current?.abort();
+      browseAbortRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const el = dirInputRef.current;
@@ -96,8 +113,10 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   useEffect(() => {
     if (workspace) {
       setFormOpen(false);
+      lastAttemptedPathRef.current = null;
       if (!isBrowserWorkspacePath(workspace.path)) {
         userEditedPathRef.current = false;
+        pathDraftRef.current = workspace.path;
         setPathDraft(workspace.path);
         saveLastWorkspacePath(workspace.path);
       }
@@ -106,11 +125,21 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
 
   useEffect(() => {
     if (!workspace && !userEditedPathRef.current && !pathDraft && knownPaths[0]) {
+      pathDraftRef.current = knownPaths[0];
       setPathDraft(knownPaths[0]);
     }
   }, [workspace, knownPaths, pathDraft]);
 
   if (!available && !workspace) return null;
+
+  const openPath = (rawPath: string, via: 'blur' | 'submit' | 'browse') => {
+    const trimmed = rawPath.trim();
+    if (!trimmed || opening || browsing) return;
+    if (via === 'blur' && lastAttemptedPathRef.current === trimmed) return;
+    lastAttemptedPathRef.current = trimmed;
+    saveLastWorkspacePath(trimmed);
+    onOpen(trimmed);
+  };
 
   const triggerBrowserFolderPick = () => {
     if (directPickerAvailable && canUseDirectDirectoryPicker() && onPickBrowser) {
@@ -127,14 +156,22 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   const handleBrowseClick = async () => {
     if (browsing || opening) return;
     if (serverAvailable && onBrowseServer && serverBrowseSupported) {
+      const controller = new AbortController();
+      browseAbortRef.current = controller;
+      browseCancelledRef.current = false;
       setBrowsing(true);
       try {
-        const initial = pathDraft.trim() || knownPaths[0] || undefined;
-        const res = await onBrowseServer(initial);
+        const initial = pathDraftRef.current.trim() || knownPaths[0] || undefined;
+        const res = await onBrowseServer(initial, controller.signal);
+        if (browseCancelledRef.current || controller.signal.aborted) {
+          return;
+        }
         if (res.supported) {
           if (!res.cancelled && res.path) {
             userEditedPathRef.current = false;
+            pathDraftRef.current = res.path;
             setPathDraft(res.path);
+            lastAttemptedPathRef.current = res.path;
             saveLastWorkspacePath(res.path);
             onOpen(res.path);
           }
@@ -142,9 +179,12 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
         }
         setServerBrowseSupported(false);
       } finally {
+        if (browseAbortRef.current === controller) {
+          browseAbortRef.current = null;
+        }
         setBrowsing(false);
       }
-      if (browserAvailable) {
+      if (!browseCancelledRef.current && browserAvailable) {
         triggerBrowserFolderPick();
       }
       return;
@@ -186,8 +226,12 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
               type="button"
               disabled={busy || opening}
               onClick={() => {
-                if (browserOnly) triggerBrowserFolderPick();
-                else setFormOpen(true);
+                if (browserOnly) {
+                  triggerBrowserFolderPick();
+                } else {
+                  lastAttemptedPathRef.current = null;
+                  setFormOpen(true);
+                }
               }}
               className="inline-flex min-h-[30px] items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-[11px] font-medium text-slate-700 transition-colors hover:border-teal-500/40 hover:bg-teal-50/50 hover:text-teal-800 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:text-teal-300"
               title="Connect a local project folder on this computer for @-mentions, search, and project outlines"
@@ -203,63 +247,98 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                const trimmed = pathDraft.trim();
-                if (trimmed && !opening) {
-                  saveLastWorkspacePath(trimmed);
-                  onOpen(trimmed);
-                }
+                openPath(pathDraftRef.current, 'submit');
               }}
               className="flex w-full flex-wrap items-center gap-2"
             >
-              <input
-                type="text"
-                list={datalistId}
-                value={pathDraft}
-                onChange={(e) => {
-                  const next = e.target.value;
-                  userEditedPathRef.current = true;
-                  setPathDraft(next);
-                  saveLastWorkspacePath(next);
-                }}
-                placeholder="/path/to/project or C:\code\project"
-                aria-label="Project folder path"
-                autoFocus
-                className="min-h-[36px] min-w-[200px] flex-1 rounded-lg border border-slate-300 bg-slate-50 px-3 font-mono text-xs text-slate-900 outline-none focus:border-teal-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-              />
+              <div className="relative min-w-[200px] flex-1">
+                <input
+                  type="text"
+                  list={datalistId}
+                  value={pathDraft}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    userEditedPathRef.current = true;
+                    lastAttemptedPathRef.current = null;
+                    pathDraftRef.current = next;
+                    setPathDraft(next);
+                    saveLastWorkspacePath(next);
+                  }}
+                  onBlur={(e) => {
+                    const suppressed = suppressBlurOpenRef.current;
+                    suppressBlurOpenRef.current = false;
+                    const nextFocus = e.relatedTarget as Node | null;
+                    if (
+                      suppressed ||
+                      (nextFocus &&
+                        (nextFocus === cancelBtnRef.current || nextFocus === browseBtnRef.current))
+                    ) {
+                      return;
+                    }
+                    openPath(pathDraftRef.current, 'blur');
+                  }}
+                  placeholder="/path/to/project or C:\code\project"
+                  aria-label="Project folder path"
+                  autoFocus
+                  className="min-h-[36px] w-full rounded-lg border border-slate-300 bg-slate-50 px-3 pr-8 font-mono text-xs text-slate-900 outline-none focus:border-teal-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                />
+                {opening && (
+                  <Loader2
+                    className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-teal-600 dark:text-teal-400"
+                    aria-label="Opening project folder"
+                  />
+                )}
+              </div>
               <datalist id={datalistId}>
                 {knownPaths.map((p) => (
                   <option key={p} value={p} />
                 ))}
               </datalist>
-              <button
-                type="submit"
-                disabled={opening || browsing || !pathDraft.trim()}
-                className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg bg-teal-600 px-3 text-xs font-medium text-white hover:bg-teal-500 disabled:opacity-50"
-              >
-                {opening && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
-                Open
-              </button>
               {((serverAvailable && Boolean(onBrowseServer) && serverBrowseSupported) || browserAvailable) && (
                 <button
+                  ref={browseBtnRef}
                   type="button"
                   disabled={opening || browsing}
-                  onClick={() => void handleBrowseClick()}
+                  onMouseDown={() => {
+                    suppressBlurOpenRef.current = true;
+                  }}
+                  onClick={() => {
+                    suppressBlurOpenRef.current = false;
+                    void handleBrowseClick();
+                  }}
                   className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                   title={
-                    serverAvailable && serverBrowseSupported
-                      ? 'Browse for a project folder on this computer'
-                      : 'Pick a folder using your browser folder dialog'
+                    browsing
+                      ? 'Waiting for folder selection dialog…'
+                      : serverAvailable && serverBrowseSupported
+                        ? 'Browse for a project folder on this computer'
+                        : 'Pick a folder using your browser folder dialog'
                   }
                 >
                   {browsing && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
-                  Browse…
+                  {browsing ? 'Choosing folder…' : 'Browse…'}
                 </button>
               )}
               <button
+                ref={cancelBtnRef}
                 type="button"
-                disabled={browsing}
-                onClick={() => setFormOpen(false)}
-                className="min-h-[36px] rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                onMouseDown={() => {
+                  suppressBlurOpenRef.current = true;
+                }}
+                onClick={() => {
+                  suppressBlurOpenRef.current = false;
+                  if (browsing) {
+                    browseCancelledRef.current = true;
+                    browseAbortRef.current?.abort();
+                    browseAbortRef.current = null;
+                    setBrowsing(false);
+                    void onCancelBrowseServer?.();
+                    return;
+                  }
+                  setFormOpen(false);
+                }}
+                title={browsing ? 'Close the folder dialog and reset Browse…' : 'Cancel'}
+                className="min-h-[36px] rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
               >
                 Cancel
               </button>
