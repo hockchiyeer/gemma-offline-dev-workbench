@@ -1,4 +1,4 @@
-import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
   ChevronDown,
@@ -11,6 +11,7 @@ import {
   FilePenLine,
   Paperclip,
   RefreshCw,
+  Search,
   Send,
   Settings2,
   Square,
@@ -33,6 +34,25 @@ import {
 } from '../lib/editProposal';
 import { inputBudgetTokens, planCompaction } from '../lib/contextEngine';
 import { estimateMessagesTokens, estimateTokens, getCalibration, recordCalibrationSample } from '../lib/tokenEstimate';
+import { embeddingSettingFor, useWorkspace } from '../lib/useWorkspace';
+import { WorkspaceConnection } from '../lib/workspaceClient';
+import {
+  assembleContextBlocks,
+  buildMentionCandidates,
+  describeUse,
+  findMention,
+  gatherWorkspaceContext,
+  removeMention,
+  type GatheredContext,
+  type MentionCandidate,
+} from '../lib/workspaceContext';
+import {
+  CODING_STARTER_CATEGORIES,
+  CODING_STARTERS,
+  filterCodingStarters,
+  type CodingStarterCategory,
+} from '../lib/codingStarters';
+import type { FileListItem, SymbolHit } from '../types/workspace';
 import {
   extractSnippetSnapshotFromSentContext,
   inferActionKindFromPrompt,
@@ -42,6 +62,7 @@ import type {
   ChatAttachmentRef,
   ChatMessage,
   ChatSession,
+  ChatWorkspace,
   CodeSnippet,
   DocPage,
   EditTarget,
@@ -57,6 +78,8 @@ import { ContextBar } from './ContextBar';
 import { EditProposalCard, type ApplyEditArgs, type SaveVersionArgs } from './EditProposalCard';
 import { useConfirm } from './ConfirmDialog';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { MentionPopup, mentionOptionId } from './MentionPopup';
+import { WorkspaceBar, type WorkspacePreview } from './WorkspaceBar';
 
 interface GemmaAssistantPaneProps {
   sessions: ChatSession[];
@@ -107,29 +130,6 @@ interface GemmaAssistantPaneProps {
   onClearQueuedPrompt: () => void;
 }
 
-const CODING_STARTERS = [
-  {
-    label: 'Design REST / RPC API',
-    prompt:
-      'Design a clean, type-safe API module with input validation and structured error handling in TypeScript.',
-  },
-  {
-    label: 'Optimize SQL Query',
-    prompt:
-      'Show how to write an indexed, injection-safe SQL query and explain its execution plan.',
-  },
-  {
-    label: 'Python Async Worker',
-    prompt:
-      'Write an asyncio worker queue in Python with graceful shutdown and bounded concurrency.',
-  },
-  {
-    label: 'Rust Error Handling',
-    prompt:
-      'Demonstrate idiomatic Rust error handling with custom Error enums and zero panics.',
-  },
-];
-
 const isAbortError = (err: unknown): boolean =>
   Boolean(err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError');
 
@@ -171,6 +171,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   const [waitSeconds, setWaitSeconds] = useState(0);
   const [contextTrimmed, setContextTrimmed] = useState(false);
   const [compacting, setCompacting] = useState(false);
+  const [gathering, setGathering] = useState(false);
   // Follow-up queued after an edit reply whose blocks did not match; sent once the runtime is idle.
   const [pendingRepair, setPendingRepair] = useState<{
     prompt: string;
@@ -178,6 +179,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     attempt: number;
   } | null>(null);
   const [expandedAttachmentKeys, setExpandedAttachmentKeys] = useState<Record<string, boolean>>({});
+  const [starterCategory, setStarterCategory] = useState<'all' | CodingStarterCategory>('all');
+  const [starterQuery, setStarterQuery] = useState('');
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [highlightedTurnId, setHighlightedTurnId] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -214,15 +217,25 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     setActiveTurnId(conversationTurns[conversationTurns.length - 1]?.id || null);
   }, [activeSession?.id, conversationTurns]);
 
+  useEffect(() => {
+    setStarterCategory('all');
+    setStarterQuery('');
+  }, [activeSession?.id]);
+
+  const filteredStarters = useMemo(
+    () => filterCodingStarters(starterCategory, starterQuery),
+    [starterCategory, starterQuery]
+  );
+
   // Elapsed-time ticker so a slow cold start is visible instead of looking frozen.
   useEffect(() => {
-    if (!streaming && !compacting) {
+    if (!streaming && !compacting && !gathering) {
       setWaitSeconds(0);
       return;
     }
     const id = setInterval(() => setWaitSeconds((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [streaming, compacting]);
+  }, [streaming, compacting, gathering]);
 
   useEffect(() => {
     scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -282,10 +295,10 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
 
   const toggleAttachment = (ref: ChatAttachmentRef) => {
     setAttachments((prev) => {
-      const exists = prev.some((a) => a.kind === ref.kind && a.id === ref.id);
-      const next = exists
-        ? prev.filter((a) => !(a.kind === ref.kind && a.id === ref.id))
-        : [...prev, ref];
+      const same = (a: ChatAttachmentRef) =>
+        a.kind === ref.kind && a.id === ref.id && a.startLine === ref.startLine && a.endLine === ref.endLine;
+      const exists = prev.some(same);
+      const next = exists ? prev.filter((a) => !same(a)) : [...prev, ref];
       if (!next.some((a) => a.kind === 'snippet')) {
         setPendingActionKind(undefined);
       }
@@ -319,6 +332,182 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     return blocks;
   };
 
+  // --- Project folder (workspace) -------------------------------------------------------------
+  const embedding = useMemo(
+    () => embeddingSettingFor(runtimeConfig),
+    [runtimeConfig.kind, runtimeConfig.baseUrl, runtimeConfig.embeddingModel]
+  );
+  const wsState = useWorkspace(activeSession?.workspace, embedding);
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [workspacePreview, setWorkspacePreview] = useState<WorkspacePreview | null>(null);
+  const [excludedKeys, setExcludedKeys] = useState<Set<string>>(new Set());
+
+  // @-mentions in the composer
+  const mentionId = useId();
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [caret, setCaret] = useState(0);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionLoading, setMentionLoading] = useState(false);
+  const [dismissedAt, setDismissedAt] = useState<number | null>(null);
+  const [mentionRemote, setMentionRemote] = useState<{
+    query: string;
+    files: FileListItem[];
+    dirs: string[];
+    symbols: SymbolHit[];
+  } | null>(null);
+  const mention = useMemo(() => findMention(input, caret), [input, caret]);
+  const mentionConn = wsState.conn;
+
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [mention?.query]);
+
+  useEffect(() => {
+    if (!mention) setDismissedAt(null);
+  }, [mention]);
+
+  useEffect(() => {
+    if (!mention || !mentionConn || !mention.query) {
+      setMentionRemote(null);
+      setMentionLoading(false);
+      return;
+    }
+    const query = mention.query;
+    const ac = new AbortController();
+    let alive = true;
+    setMentionLoading(true);
+    const t = setTimeout(() => {
+      Promise.all([mentionConn.files(query, 6, ac.signal), mentionConn.symbols(query, 4, ac.signal)])
+        .then(([f, symbols]) => {
+          if (alive) setMentionRemote({ query, files: f.files, dirs: f.dirs, symbols });
+        })
+        .catch(() => {
+          if (alive) setMentionRemote({ query, files: [], dirs: [], symbols: [] });
+        })
+        .finally(() => {
+          if (alive) setMentionLoading(false);
+        });
+    }, 120);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+      ac.abort();
+    };
+  }, [mention?.query, mentionConn]);
+
+  const mentionCandidates = useMemo<MentionCandidate[]>(() => {
+    if (!mention) return [];
+    const remote = mentionRemote && mentionRemote.query === mention.query ? mentionRemote : null;
+    return buildMentionCandidates(mention.query, {
+      workspace: Boolean(mentionConn && activeSession?.workspace),
+      files: remote?.files,
+      dirs: remote?.dirs,
+      symbols: remote?.symbols,
+      snippets,
+      docs,
+    });
+  }, [mention, mentionRemote, mentionConn, activeSession?.workspace, snippets, docs]);
+
+  // Silent when nothing matches, so an "@word" in ordinary prose does not pop up an empty box.
+  const mentionOpen =
+    Boolean(mention) &&
+    dismissedAt !== mention?.start &&
+    !streaming &&
+    !compacting &&
+    (mentionCandidates.length > 0 || mentionLoading);
+
+  const selectMention = (c: MentionCandidate) => {
+    if (!mention) return;
+    setAttachments((prev) =>
+      prev.some(
+        (a) =>
+          a.kind === c.ref.kind &&
+          a.id === c.ref.id &&
+          a.startLine === c.ref.startLine &&
+          a.endLine === c.ref.endLine
+      )
+        ? prev
+        : [...prev, c.ref]
+    );
+    const next = removeMention(input, mention, caret);
+    setInput(next.text);
+    setCaret(next.caret);
+    setWorkspacePreview(null);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(next.caret, next.caret);
+      }
+    });
+  };
+
+  const knownWorkspacePaths = useMemo(
+    () => [...new Set(sessions.map((x) => x.workspace?.path).filter((p): p is string => Boolean(p)))],
+    [sessions]
+  );
+
+  const persistWorkspace = (workspace: ChatWorkspace | undefined) => {
+    if (!activeSession) return;
+    void onUpdateSession({ ...activeSession, workspace, updatedAt: Date.now() }, { immediate: true });
+  };
+
+  const handleOpenWorkspace = async (rawPath: string) => {
+    setOpening(true);
+    setOpenError(null);
+    try {
+      const info = await new WorkspaceConnection(rawPath, embedding).open();
+      persistWorkspace({ path: info.rootPath, repoMap: true, autoRetrieve: true });
+      setWorkspacePreview(null);
+      setExcludedKeys(new Set());
+    } catch (e) {
+      setOpenError(e instanceof Error ? e.message : 'Could not open that folder.');
+    } finally {
+      setOpening(false);
+    }
+  };
+
+  const handleCloseWorkspace = () => {
+    persistWorkspace(undefined);
+    setWorkspacePreview(null);
+    setExcludedKeys(new Set());
+    setAttachments((prev) => prev.filter((a) => a.kind === 'snippet' || a.kind === 'doc'));
+  };
+
+  const handleToggleWorkspace = (key: 'repoMap' | 'autoRetrieve', value: boolean) => {
+    if (!activeSession?.workspace) return;
+    persistWorkspace({ ...activeSession.workspace, [key]: value });
+    setWorkspacePreview(null);
+  };
+
+  // Retrieval and outline sizes follow the prompt budget: a small window gets less, not a truncated mess.
+  const workspaceBudget = (inputBudget: number) => ({
+    retrieveK: inputBudget < 3000 ? 3 : 6,
+    mapTokens: Math.min(900, Math.floor(inputBudget * 0.2)),
+  });
+
+  const handlePreviewWorkspace = async () => {
+    if (!wsState.conn || !activeSession?.workspace) return;
+    setPreviewing(true);
+    try {
+      const question = input.trim();
+      const g = await gatherWorkspaceContext({
+        conn: wsState.conn,
+        workspace: activeSession.workspace,
+        question,
+        refs: attachments,
+        ...workspaceBudget(inputBudgetTokens(promptBudget)),
+      });
+      setWorkspacePreview({ query: question, gathered: g });
+    } catch (e) {
+      if (!isAbortError(e)) setStreamError(e instanceof Error ? e.message : 'Could not preview project context.');
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
   // Edit mode: the reply is read as SEARCH/REPLACE blocks to review, not as code to save wholesale.
   const editMode = pendingActionKind === 'edit' && attachments.some((a) => a.kind === 'snippet');
 
@@ -343,6 +532,18 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       { summary: activeSession.summary, calibration: getCalibration(runtimeConfig.selectedModel) }
     ).usage;
   }, [activeSession, deferredInput, attachments, editMode, runtimeConfig, promptBudget, snippets, docs]);
+
+  const meterUsage = useMemo(() => {
+    if (!livePreview || !workspacePreview) return livePreview;
+    const extra = workspacePreview.gathered.use.items
+      .filter((i) => !(i.via === 'retrieved' && excludedKeys.has(i.label)))
+      .reduce((n, i) => n + i.tokens, 0);
+    return {
+      ...livePreview,
+      totalTokens: livePreview.totalTokens + extra,
+      contextTokens: livePreview.contextTokens + extra,
+    };
+  }, [livePreview, workspacePreview, excludedKeys]);
 
   const lastStats = useMemo(() => {
     const msgs = activeSession?.messages ?? [];
@@ -579,6 +780,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     if (!opts?.attachments) {
       setAttachments([]);
       setPendingActionKind(undefined);
+      setWorkspacePreview(null);
+      setExcludedKeys(new Set());
     }
     setShowAttachDrawer(false);
 
@@ -633,10 +836,40 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         }
       }
 
+      // Project material: @-mentioned files/folders/git output, auto-search hits, and the outline.
+      let gathered: GatheredContext | null = null;
+      const wsConfig = activeSession.workspace;
+      if (wsConfig && wsState.conn) {
+        setGathering(true);
+        try {
+          gathered = await gatherWorkspaceContext({
+            conn: wsState.conn,
+            workspace: wsConfig,
+            question: text,
+            refs: usedAttachments,
+            ...workspaceBudget(inputBudgetTokens(promptBudget)),
+            excludeKeys: workspacePreview && workspacePreview.query === text ? excludedKeys : undefined,
+            signal: controller.signal,
+          });
+          if (gathered.warnings.length > 0) {
+            const errorsOnly = gathered.warnings.filter((w) => !w.startsWith('Redacted '));
+            if (errorsOnly.length > 0) setStreamError(errorsOnly.join(' '));
+          }
+        } finally {
+          setGathering(false);
+        }
+      } else if (usedAttachments.some((a) => a.kind === 'file' || a.kind === 'folder' || a.kind === 'symbol' || a.kind === 'git')) {
+        setStreamError('Project files were mentioned, but no project folder is connected to this chat, so they were not included.');
+      }
+
       const built = buildGemmaMessages(
         runtimeConfig.systemPrompt,
         historyWithUser,
-        isEditTurn ? [EDIT_INSTRUCTION_BLOCK, ...resolveContextBlocks(usedAttachments)] : resolveContextBlocks(usedAttachments),
+        assembleContextBlocks({
+          edit: isEditTurn ? EDIT_INSTRUCTION_BLOCK : null,
+          vault: resolveContextBlocks(usedAttachments),
+          gathered,
+        }),
         promptBudget,
         { summary, calibration }
       );
@@ -649,7 +882,13 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         ...baseSession,
         summary,
         messages: baseSession.messages.map((m) =>
-          m.id === userMsg.id ? { ...m, sentContext: built.sentContext || undefined } : m
+          m.id === userMsg.id
+            ? {
+                ...m,
+                sentContext: built.sentContext || undefined,
+                workspaceContext: gathered && gathered.use.items.length > 0 ? gathered.use : undefined,
+              }
+            : m
         ),
       };
       await onUpdateSession(workingSession, { immediate: true });
@@ -1008,7 +1247,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                           if (att.kind !== 'snippet') {
                             return (
                               <span
-                                key={`${att.kind}-${att.id}`}
+                                key={`${att.kind}-${att.id}-${att.startLine ?? ''}`}
                                 className="font-mono text-teal-700 dark:text-teal-400"
                               >
                                 @{att.kind}:{att.title}
@@ -1041,7 +1280,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
 
                             return (
                               <span
-                                key={`${att.kind}-${att.id}`}
+                                key={`${att.kind}-${att.id}-${att.startLine ?? ''}`}
                                 className="inline-flex max-w-full flex-wrap items-center gap-1.5 rounded-lg border border-teal-600/25 bg-teal-500/10 px-2 py-1 text-teal-700 dark:border-teal-500/25 dark:bg-teal-500/10 dark:text-teal-300"
                               >
                                 {onOpenSnippet ? (
@@ -1111,7 +1350,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
 
                           return (
                             <span
-                              key={`${att.kind}-${att.id}`}
+                              key={`${att.kind}-${att.id}-${att.startLine ?? ''}`}
                               className="inline-flex max-w-full flex-wrap items-center gap-1.5 rounded-lg border border-rose-500/35 bg-rose-500/10 px-2 py-1 text-rose-800 dark:border-rose-400/30 dark:bg-rose-950/40 dark:text-rose-300"
                               title={`Source snippet "${att.title}" was deleted from the Snippets tab`}
                             >
@@ -1242,6 +1481,25 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                   );
                 })()}
 
+                {msg.workspaceContext && msg.workspaceContext.items.length > 0 && (
+                  <details className="mb-2.5 text-xs text-slate-600 dark:text-slate-400">
+                    <summary className="cursor-pointer select-none font-medium hover:text-slate-900 dark:hover:text-slate-200">
+                      Project context added: {describeUse(msg.workspaceContext)}
+                    </summary>
+                    <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
+                      {msg.workspaceContext.items.map((item, i) => (
+                        <li key={`${item.via}-${item.label}-${i}`} className="flex gap-2">
+                          <span className="w-16 shrink-0 font-sans uppercase tracking-wide text-slate-400">
+                            {item.via === 'retrieved' ? 'found' : item.via}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                          <span className="shrink-0 tabular-nums text-slate-400">{item.tokens}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+
                 {msg.role === 'user' ? (
                   <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-900 dark:text-slate-100">
                     {displayContent}
@@ -1330,7 +1588,9 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                 ) : isStreamingThis ? (
                   <div className="space-y-2 font-mono text-xs text-slate-500 dark:text-slate-400">
                     <p>
-                      {compacting
+                      {gathering
+                        ? `Reading project files… ${waitSeconds}s`
+                        : compacting
                         ? `Condensing earlier turns into a summary… ${waitSeconds}s`
                         : !modelLoaded
                         ? `Loading model into memory… ${waitSeconds}s (first request after idle can take a minute)`
@@ -1366,23 +1626,110 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
           )}
 
           {activeSession && activeSession.messages.length <= 1 && (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {CODING_STARTERS.map((starter) => (
-                <button
-                  key={starter.label}
-                  type="button"
-                  onClick={() => setInput(starter.prompt)}
-                  className="rounded-xl border border-slate-200 bg-white p-3.5 text-left transition-colors hover:border-teal-500/40 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/60 dark:hover:bg-slate-800/60"
-                >
-                  <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                    {starter.label}
-                  </div>
-                  <div className="mt-1 line-clamp-2 text-xs text-slate-500 dark:text-slate-400">
-                    {starter.prompt}
-                  </div>
-                </button>
-              ))}
-            </div>
+            <section aria-label="Coding task starters" className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-baseline gap-2">
+                  <h3 className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                    Choose a coding task to start
+                  </h3>
+                  <span className="text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+                    {filteredStarters.length} of {CODING_STARTERS.length} templates
+                  </span>
+                </div>
+
+                <div className="relative w-full sm:w-56">
+                  <Search
+                    className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400"
+                    aria-hidden="true"
+                  />
+                  <input
+                    type="text"
+                    value={starterQuery}
+                    onChange={(e) => setStarterQuery(e.target.value)}
+                    placeholder="Filter coding tasks…"
+                    aria-label="Filter coding starter tasks"
+                    className="min-h-[34px] w-full rounded-lg border border-slate-200 bg-white pl-8 pr-7 text-xs text-slate-800 outline-none placeholder:text-slate-400 focus:border-teal-600 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-100 dark:placeholder:text-slate-500"
+                  />
+                  {starterQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setStarterQuery('')}
+                      aria-label="Clear task filter"
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div
+                role="group"
+                aria-label="Coding task categories"
+                className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-900/80"
+              >
+                {CODING_STARTER_CATEGORIES.map((cat) => {
+                  const active = starterCategory === cat.id;
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setStarterCategory(cat.id)}
+                      className={`whitespace-nowrap shrink-0 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                        active
+                          ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-slate-100'
+                          : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+                      }`}
+                    >
+                      {cat.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {filteredStarters.length > 0 ? (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {filteredStarters.map((starter) => (
+                    <button
+                      key={starter.id}
+                      type="button"
+                      onClick={() => {
+                        setInput(starter.prompt);
+                        textareaRef.current?.focus();
+                      }}
+                      className="rounded-xl border border-slate-200 bg-white p-3.5 text-left transition-colors hover:border-teal-500/50 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/60 dark:hover:bg-slate-800/60"
+                    >
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
+                          {starter.label}
+                        </span>
+                        <span className="shrink-0 whitespace-nowrap text-[11px] text-slate-500 dark:text-slate-400">
+                          {starter.stack}
+                        </span>
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                        {starter.prompt}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-400">
+                  <span>No coding tasks match "{starterQuery.trim()}".</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStarterCategory('all');
+                      setStarterQuery('');
+                    }}
+                    className="whitespace-nowrap shrink-0 rounded-lg border border-slate-300 px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    Reset filters
+                  </button>
+                </div>
+              )}
+            </section>
           )}
 
             <div ref={scrollEndRef} />
@@ -1399,8 +1746,35 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       {/* Composer */}
       <div className="border-t border-slate-200 bg-white p-3 sm:p-4 dark:border-slate-800 dark:bg-slate-900/80">
         <div className="mx-auto max-w-3xl space-y-2.5">
+          <WorkspaceBar
+            available={wsState.available}
+            workspace={activeSession?.workspace}
+            info={wsState.info}
+            connecting={wsState.connecting}
+            error={wsState.error}
+            openError={openError}
+            opening={opening}
+            knownPaths={knownWorkspacePaths}
+            inputBudget={inputBudgetTokens(promptBudget)}
+            preview={workspacePreview}
+            previewing={previewing}
+            excluded={excludedKeys}
+            busy={streaming || compacting || gathering}
+            onOpen={(p) => void handleOpenWorkspace(p)}
+            onClose={handleCloseWorkspace}
+            onToggle={handleToggleWorkspace}
+            onPreview={() => void handlePreviewWorkspace()}
+            onToggleExcluded={(key) =>
+              setExcludedKeys((prev) => {
+                const next = new Set(prev);
+                if (next.has(key)) next.delete(key);
+                else next.add(key);
+                return next;
+              })
+            }
+          />
           <ContextBar
-            usage={livePreview}
+            usage={meterUsage}
             lastStats={lastStats}
             summary={activeSession?.summary}
             streaming={streaming}
@@ -1498,7 +1872,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
               <span>Context:</span>
               {attachments.map((att) => (
                 <button
-                  key={`${att.kind}-${att.id}`}
+                  key={`${att.kind}-${att.id}-${att.startLine ?? ''}`}
                   type="button"
                   onClick={() => toggleAttachment(att)}
                   className="inline-flex min-h-[32px] items-center gap-1 rounded-md border border-slate-200 bg-slate-100 px-2 py-1 font-mono text-[11px] hover:text-red-600 dark:border-slate-800 dark:bg-slate-800 dark:hover:text-red-400"
@@ -1523,19 +1897,70 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
               <Paperclip className="h-4 w-4" />
             </button>
 
-            <textarea
-              rows={2}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
+            <div className="relative min-w-0 flex-1">
+              {mentionOpen && (
+                <div className="absolute bottom-full left-0 right-0 z-20 mb-2">
+                  <MentionPopup
+                    candidates={mentionCandidates}
+                    activeIndex={Math.min(mentionIndex, Math.max(0, mentionCandidates.length - 1))}
+                    loading={mentionLoading}
+                    idPrefix={mentionId}
+                    onSelect={selectMention}
+                    onHover={setMentionIndex}
+                  />
+                </div>
+              )}
+              <textarea
+                ref={textareaRef}
+                rows={2}
+                value={input}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  setCaret(e.currentTarget.selectionStart ?? e.target.value.length);
+                }}
+                onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
+                role="combobox"
+                aria-expanded={mentionOpen && mentionCandidates.length > 0}
+                aria-controls={mentionOpen ? `${mentionId}-list` : undefined}
+                aria-autocomplete="list"
+                aria-activedescendant={
+                  mentionOpen && mentionCandidates.length > 0
+                    ? mentionOptionId(mentionId, Math.min(mentionIndex, mentionCandidates.length - 1))
+                    : undefined
                 }
-              }}
-              placeholder="Ask your local Gemma model to write, debug, refactor, explain, expand, and test code..."
-              className="max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-teal-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
-            />
+                onKeyDown={(e) => {
+                  if (mentionOpen) {
+                    const n = mentionCandidates.length;
+                    if (n > 0 && e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      setMentionIndex((i) => (i + 1) % n);
+                      return;
+                    }
+                    if (n > 0 && e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      setMentionIndex((i) => (i - 1 + n) % n);
+                      return;
+                    }
+                    if (n > 0 && (e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
+                      e.preventDefault();
+                      selectMention(mentionCandidates[Math.min(mentionIndex, n - 1)]);
+                      return;
+                    }
+                    if (e.key === 'Escape' && mention) {
+                      e.preventDefault();
+                      setDismissedAt(mention.start);
+                      return;
+                    }
+                  }
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                placeholder="Ask your local Gemma model to write, debug, refactor, explain, expand, and test code... (type @ to attach files, symbols, git changes, snippets or docs)"
+                className="max-h-40 min-h-[44px] w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-teal-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
+              />
+            </div>
 
             {streaming ? (
               <button

@@ -397,6 +397,30 @@ export const LocalGemmaSetupModal: React.FC<LocalGemmaSetupModalProps> = ({
 
           <div>
             <label
+              htmlFor="runtime-embedding-model"
+              className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+            >
+              Embedding model for project search (optional, Ollama)
+            </label>
+            <input
+              id="runtime-embedding-model"
+              type="text"
+              value={draft.embeddingModel ?? ''}
+              disabled={draft.kind !== 'ollama'}
+              onChange={(e) => setDraft({ ...draft, embeddingModel: e.target.value })}
+              placeholder="embeddinggemma"
+              autoComplete="off"
+              spellCheck={false}
+              className="mt-1.5 min-h-[44px] w-full rounded-xl border border-slate-300 bg-slate-50 px-3.5 font-mono text-xs text-slate-900 outline-none focus:border-teal-600 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            />
+            <p className="mt-1 text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+              When a project folder is open, this adds meaning-based search on top of keyword search. Install it first
+              (for example <span className="font-mono">ollama pull embeddinggemma</span>). Leave blank for keyword search only.
+            </p>
+          </div>
+
+          <div>
+            <label
               htmlFor="runtime-system-prompt"
               className="block text-xs font-medium text-slate-700 dark:text-slate-300"
             >

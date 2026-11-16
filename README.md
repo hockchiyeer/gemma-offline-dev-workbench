@@ -158,6 +158,25 @@ refused if it changed after the edit, and a quick bracket/string check warns whe
 worse than it was (it is a heuristic, not a compiler). Edit replies use a lower temperature, and the format
 instructions travel with the message rather than the system prompt, so the runtime's prompt cache stays warm.
 
+## Working with a local project folder
+
+When GemmaVault runs on your machine (`127.0.0.1`), you can attach a project folder to any coding chat:
+
+1. Click **Open project folder** above the composer and enter the folder path (remembered per chat session).
+2. Type `@` in the composer to attach **files** (`src/payments.ts`), **folders**, **symbols**, **git status / diff**,
+   or vault snippets and docs.
+3. Optional controls on the workspace bar:
+   - **Auto-search**: finds related code chunks with local BM25 keyword search, and optionally meaning-based search if
+     you set an Ollama **Embedding model** (e.g. `embeddinggemma`) in **Model Setup**.
+   - **Outline**: sends a compact project map of key files and top symbols.
+   - **Preview**: inspects what will be attached (with token counts) and lets you untick any auto-retrieved chunk.
+4. Every message records a collapsible **Project context added** disclosure listing what was included, and follows the
+   same prompt-cache-friendly layout (system prompt untouched).
+
+Safety: folder access is disabled when exposed over LAN (`HOST=0.0.0.0`), rejects path traversal and symlinks leaving
+the folder, honours `.gitignore` and `.gemmaignore`, excludes `.env*`, private keys, `.git/`, and build directories, and
+redacts common secret patterns before indexing or sending to the model.
+
 ## Slow or stuck answers
 
 Gemma 4 normally *reasons* before it writes the answer. On a CPU-only machine that phase can take minutes for a simple question, so the chat shows what it is doing while you wait:

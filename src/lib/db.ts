@@ -103,6 +103,10 @@ export function sanitizeRuntimeConfig(raw?: Partial<LocalRuntimeConfig> | null):
     clampNumber(raw?.keepAliveMinutes, DEFAULT_RUNTIME_CONFIG.keepAliveMinutes ?? 30, 0, 1440)
   );
   const autoCompact = raw?.autoCompact !== false;
+  const embeddingModel =
+    typeof raw?.embeddingModel === 'string' && raw.embeddingModel.trim()
+      ? raw.embeddingModel.trim().slice(0, 120)
+      : undefined;
   const systemPrompt =
     typeof raw?.systemPrompt === 'string' && raw.systemPrompt.trim()
       ? raw.systemPrompt
@@ -118,6 +122,7 @@ export function sanitizeRuntimeConfig(raw?: Partial<LocalRuntimeConfig> | null):
     reasoning,
     keepAliveMinutes,
     autoCompact,
+    ...(embeddingModel ? { embeddingModel } : {}),
     systemPrompt,
   };
 }

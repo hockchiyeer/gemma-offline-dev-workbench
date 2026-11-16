@@ -71,9 +71,31 @@ export interface DocPage {
 }
 
 export interface ChatAttachmentRef {
-  kind: 'snippet' | 'doc';
+  kind: 'snippet' | 'doc' | 'file' | 'folder' | 'symbol' | 'git';
   id: string;
   title: string;
+  /** Optional 1-based inclusive line range for file/symbol mentions. */
+  startLine?: number;
+  endLine?: number;
+}
+
+export interface ChatWorkspace {
+  path: string;
+  repoMap: boolean;
+  autoRetrieve: boolean;
+}
+
+export interface WorkspaceContextItem {
+  via: 'mention' | 'retrieved' | 'map';
+  label: string;
+  tokens: number;
+}
+
+export interface WorkspaceContextUse {
+  workspaceName: string;
+  items: WorkspaceContextItem[];
+  truncated?: boolean;
+  mode?: 'lexical' | 'semantic' | 'hybrid';
 }
 
 export interface SavedSnippetRef {
@@ -158,6 +180,8 @@ export interface ChatMessage {
   createdAt: number;
   durationMs?: number;
   attachments?: ChatAttachmentRef[];
+  /** Summary of project files/search hits/map automatically or explicitly included on this turn. */
+  workspaceContext?: WorkspaceContextUse;
   actionKind?: SnippetActionKind;
   savedSnippets?: SavedSnippetRef[];
 }
@@ -167,6 +191,8 @@ export interface ChatSession {
   projectId: string;
   title: string;
   messages: ChatMessage[];
+  /** Optional local project folder attached to this coding chat. */
+  workspace?: ChatWorkspace;
   /** Condensed memory of the oldest turns (see ConversationSummary). */
   summary?: ConversationSummary;
   createdAt: number;
@@ -193,6 +219,8 @@ export interface LocalRuntimeConfig {
   keepAliveMinutes?: number;
   /** Condense the oldest turns into a summary note when a chat outgrows its history budget. Default on. */
   autoCompact?: boolean;
+  /** Optional Ollama embedding model tag (for example `embeddinggemma`) for semantic project search. */
+  embeddingModel?: string;
   systemPrompt: string;
 }
 

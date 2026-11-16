@@ -4,6 +4,9 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createSetupManager, type SetupManager } from './server/ollamaSetup.ts';
+import { handleWorkspaceOp } from './server/workspace/api.ts';
+import { WorkspaceError } from './server/workspace/safety.ts';
+import { createWorkspaceManager, type WorkspaceManager } from './server/workspace/workspace.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -117,8 +120,11 @@ function sameOriginOnly(req: Request, res: Response, next: NextFunction) {
 export interface CreateAppOptions {
   bindHost?: string;
   setupManager?: SetupManager;
+  workspaceManager?: WorkspaceManager;
   /** Automatic install/pull is only offered when the server is bound to loopback. */
   allowSetup?: boolean;
+  /** Workspace filesystem access is only offered when the server is bound to loopback. */
+  allowWorkspace?: boolean;
   /** Override production header mode (defaults to NODE_ENV=production or --production). */
   isProduction?: boolean;
   /** Override managed container detection (defaults to K_SERVICE / APP_URL). */
@@ -128,7 +134,9 @@ export interface CreateAppOptions {
 export function createApp(options: CreateAppOptions = {}) {
   const bindHost = options.bindHost ?? HOST;
   const setupManager = options.setupManager ?? createSetupManager();
+  const workspaceManager = options.workspaceManager ?? createWorkspaceManager();
   const allowSetup = options.allowSetup ?? LOOPBACK_BIND_HOSTS.has(bindHost);
+  const allowWorkspace = options.allowWorkspace ?? LOOPBACK_BIND_HOSTS.has(bindHost);
   const productionHeaders = options.isProduction ?? isProduction;
   const managedContainer = options.managedContainer ?? isManagedContainer;
   const app = express();
@@ -176,6 +184,39 @@ export function createApp(options: CreateAppOptions = {}) {
   app.post('/api/setup/cancel', setupGuard, (_req, res) => {
     setupManager.cancel();
     res.json({ job: setupManager.getState() });
+  });
+
+  // --- Local project workspace access (files, symbols, search, repo map, git) ---
+  const workspaceGuard = (req: Request, res: Response, next: NextFunction) => {
+    if (!allowWorkspace) {
+      res.status(403).json({
+        error: 'Project folder access is disabled while GemmaVault is exposed on the network. Run it on 127.0.0.1 to use it.',
+      });
+      return;
+    }
+    if (req.method !== 'GET' && req.get('x-gemmavault-workspace') !== '1') {
+      res.status(400).json({ error: 'Missing X-GemmaVault-Workspace header.' });
+      return;
+    }
+    next();
+  };
+
+  app.get('/api/workspace/status', (_req, res) => {
+    res.json({ available: allowWorkspace });
+  });
+
+  app.post('/api/workspace/:op', workspaceGuard, async (req, res) => {
+    try {
+      const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+      const result = await handleWorkspaceOp(workspaceManager, String(req.params.op || ''), body);
+      res.json(result);
+    } catch (err) {
+      if (err instanceof WorkspaceError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Workspace operation failed.' });
+    }
   });
 
   // Local AI runtime health & model discovery proxy (bypasses browser CORS for local Ollama/LM Studio)
