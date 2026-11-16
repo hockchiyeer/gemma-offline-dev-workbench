@@ -51,6 +51,7 @@ import {
   type WebGPUStatus,
 } from './lib/gemmaClient';
 import { createSaveQueue } from './lib/saveQueue';
+import { nextDefaultSessionTitle } from './lib/sessionNaming';
 import {
   createChildSnippets,
   extractFencedCodeBlocks,
@@ -548,7 +549,7 @@ function AppShell() {
     const newSession: ChatSession = {
       id: `chat-${crypto.randomUUID()}`,
       projectId: activeProjectId === 'all' ? fallbackProject : activeProjectId,
-      title: 'New Coding Session',
+      title: nextDefaultSessionTitle(workspace?.sessions || []),
       messages: [
         {
           id: `msg-${crypto.randomUUID()}`,

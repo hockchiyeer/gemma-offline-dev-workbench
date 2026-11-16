@@ -1,6 +1,7 @@
 import React, { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
+  Check,
   ChevronDown,
   ChevronUp,
   Code2,
@@ -10,6 +11,7 @@ import {
   MessageSquarePlus,
   FilePenLine,
   Paperclip,
+  Pencil,
   RefreshCw,
   Search,
   Send,
@@ -52,6 +54,7 @@ import {
   filterCodingStarters,
   type CodingStarterCategory,
 } from '../lib/codingStarters';
+import { deriveSessionTitle, isDefaultSessionTitle } from '../lib/sessionNaming';
 import type { FileListItem, SymbolHit } from '../types/workspace';
 import {
   extractSnippetSnapshotFromSentContext,
@@ -181,6 +184,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   const [expandedAttachmentKeys, setExpandedAttachmentKeys] = useState<Record<string, boolean>>({});
   const [starterCategory, setStarterCategory] = useState<'all' | CodingStarterCategory>('all');
   const [starterQuery, setStarterQuery] = useState('');
+  const [isRenamingSession, setIsRenamingSession] = useState(false);
+  const [renameDraft, setRenameDraft] = useState('');
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [highlightedTurnId, setHighlightedTurnId] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -220,7 +225,37 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   useEffect(() => {
     setStarterCategory('all');
     setStarterQuery('');
+    setIsRenamingSession(false);
+    setRenameDraft('');
   }, [activeSession?.id]);
+
+  const startRenameSession = () => {
+    if (!activeSession) return;
+    setRenameDraft(activeSession.title);
+    setIsRenamingSession(true);
+  };
+
+  const cancelRenameSession = () => {
+    setIsRenamingSession(false);
+    setRenameDraft('');
+  };
+
+  const commitRenameSession = async () => {
+    if (!activeSession) return;
+    const trimmed = renameDraft.trim();
+    setIsRenamingSession(false);
+    if (!trimmed) return;
+    if (trimmed === activeSession.title && activeSession.titleLocked) return;
+    await onUpdateSession(
+      {
+        ...activeSession,
+        title: trimmed,
+        titleLocked: true,
+        updatedAt: Date.now(),
+      },
+      { immediate: true }
+    );
+  };
 
   const filteredStarters = useMemo(
     () => filterCodingStarters(starterCategory, starterQuery),
@@ -760,10 +795,16 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       createdAt: now + 1,
     };
 
-    const nextTitle =
-      activeSession.messages.length <= 1
-        ? text.slice(0, 42) + (text.length > 42 ? '…' : '')
-        : activeSession.title;
+    const shouldAutoName =
+      !activeSession.titleLocked &&
+      (activeSession.messages.length <= 1 || isDefaultSessionTitle(activeSession.title));
+    const nextTitle = shouldAutoName
+      ? deriveSessionTitle({
+          prompt: text,
+          attachments: usedAttachments,
+          actionKind: resolvedActionKind,
+        })
+      : activeSession.title;
 
     const historyWithUser = [...activeSession.messages, userMsg];
     const baseSession: ChatSession = {
@@ -1070,19 +1111,75 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5">
-          {sessions.length > 1 && (
-            <select
-              aria-label="Select chat session"
-              value={activeSession?.id || ''}
-              onChange={(e) => onSelectSession(e.target.value)}
-              className="min-h-[36px] max-w-[160px] truncate rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-800 outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
-            >
-              {sessions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.title}
-                </option>
-              ))}
-            </select>
+          {activeSession && isRenamingSession ? (
+            <div className="inline-flex min-h-[36px] items-center overflow-hidden rounded-lg border border-teal-600/60 bg-white focus-within:ring-2 focus-within:ring-teal-500/30 dark:bg-slate-950">
+              <input
+                type="text"
+                value={renameDraft}
+                onChange={(e) => setRenameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void commitRenameSession();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelRenameSession();
+                  }
+                }}
+                aria-label="Rename chat session"
+                maxLength={80}
+                autoFocus
+                className="h-[34px] w-40 bg-transparent px-2.5 text-xs text-slate-900 outline-none sm:w-48 dark:text-slate-100"
+              />
+              <button
+                type="button"
+                onClick={() => void commitRenameSession()}
+                aria-label="Save chat name"
+                title="Save session name"
+                className="flex h-[34px] w-8 shrink-0 items-center justify-center border-l border-slate-200/80 text-teal-700 transition-colors hover:bg-teal-500/15 dark:border-slate-800 dark:text-teal-300"
+              >
+                <Check className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={cancelRenameSession}
+                aria-label="Cancel rename"
+                title="Cancel rename"
+                className="flex h-[34px] w-8 shrink-0 items-center justify-center border-l border-slate-200/80 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 dark:border-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            activeSession && (
+              <div className="inline-flex min-h-[36px] items-center overflow-hidden rounded-lg border border-slate-200 bg-slate-50 focus-within:border-teal-600/60 dark:border-slate-800 dark:bg-slate-950">
+                <select
+                  aria-label="Select chat session"
+                  value={activeSession.id}
+                  onChange={(e) => onSelectSession(e.target.value)}
+                  className="h-[34px] max-w-[165px] truncate bg-transparent pl-2.5 pr-1 text-xs text-slate-800 outline-none dark:text-slate-200"
+                >
+                  {sessions.map((s) => (
+                    <option
+                      key={s.id}
+                      value={s.id}
+                      className="bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100"
+                    >
+                      {s.title}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={startRenameSession}
+                  aria-label="Rename current chat"
+                  title="Rename current chat session"
+                  className="flex h-[34px] w-7 shrink-0 items-center justify-center border-l border-slate-200/80 text-slate-400 transition-colors hover:bg-slate-200/60 hover:text-teal-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500 dark:border-slate-800/80 dark:text-slate-500 dark:hover:bg-slate-800/70 dark:hover:text-teal-300"
+                >
+                  <Pencil className="h-3 w-3" />
+                </button>
+              </div>
+            )
           )}
 
           <div className="relative inline-flex">

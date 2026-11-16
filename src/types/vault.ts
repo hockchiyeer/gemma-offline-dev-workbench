@@ -190,6 +190,8 @@ export interface ChatSession {
   id: string;
   projectId: string;
   title: string;
+  /** True when the user explicitly renamed this session, preventing auto-naming from overwriting it. */
+  titleLocked?: boolean;
   messages: ChatMessage[];
   /** Optional local project folder attached to this coding chat. */
   workspace?: ChatWorkspace;
