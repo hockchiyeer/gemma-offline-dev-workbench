@@ -12,6 +12,21 @@ import type {
   WorkspaceInfo,
 } from '../types/workspace';
 
+export interface WorkspaceConnectionLike {
+  readonly root: string;
+  readonly mode: 'server' | 'browser';
+  open(signal?: AbortSignal): Promise<WorkspaceInfo>;
+  close(): Promise<{ ok: boolean }>;
+  info(signal?: AbortSignal): Promise<WorkspaceInfo>;
+  files(query: string, limit?: number, signal?: AbortSignal): Promise<FileListResult>;
+  tree(dir?: string, depth?: number, signal?: AbortSignal): Promise<TreeEntry[]>;
+  read(path: string, startLine?: number, endLine?: number, signal?: AbortSignal): Promise<FileRead>;
+  symbols(query: string, limit?: number, signal?: AbortSignal): Promise<SymbolHit[]>;
+  search(query: string, mode?: SearchMode, limit?: number, signal?: AbortSignal): Promise<SearchResult>;
+  repoMap(maxTokens?: number, focus?: string[], signal?: AbortSignal): Promise<RepoMapResult>;
+  git(gitOp: GitOp, signal?: AbortSignal): Promise<GitResult>;
+}
+
 export async function probeWorkspaceAvailable(signal?: AbortSignal): Promise<boolean> {
   try {
     const res = await fetch('/api/workspace/status', { signal });
@@ -23,8 +38,9 @@ export async function probeWorkspaceAvailable(signal?: AbortSignal): Promise<boo
   }
 }
 
-export class WorkspaceConnection {
+export class WorkspaceConnection implements WorkspaceConnectionLike {
   readonly root: string;
+  readonly mode = 'server' as const;
   private readonly embedding: EmbeddingSetting | null;
 
   constructor(root: string, embedding: EmbeddingSetting | null = null) {

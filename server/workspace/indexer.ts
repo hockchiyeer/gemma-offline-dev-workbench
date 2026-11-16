@@ -1,101 +1,138 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { SymbolHit } from '../../src/types/workspace.ts';
-import { IgnoreMatcher } from './ignore.ts';
-import { extractImports, extractSymbols } from './symbols.ts';
-import { isBinaryName, isDeniedName, languageOf, looksBinary, redactSecrets } from './safety.ts';
+import {
+  IgnoreMatcher,
+  LIMITS,
+  bm25Search,
+  buildBm25,
+  buildFileChunks,
+  extractImports,
+  extractSymbols,
+  fuseRanks,
+  isBinaryName,
+  isDeniedName,
+  isDeniedPath,
+  languageOf,
+  looksBinaryBytes,
+  queryTerms,
+  rankFiles,
+  redactSecrets,
+  renderRepoMap,
+  tokenize,
+  type Bm25Index,
+  type Chunk,
+  type FileEntry,
+  type ScanResult,
+} from '../../src/lib/workspaceCore.ts';
 
-export const LIMITS = {
-  maxFiles: 6000,
-  maxDepth: 14,
-  maxIndexBytes: 400_000, // larger files are listed but not indexed
-  maxReadBytes: 1_000_000,
-  maxTotalIndexBytes: 60_000_000,
-  chunkTargetLines: 40,
-  chunkMaxLines: 70,
-  chunkOverlap: 4,
+export {
+  LIMITS,
+  bm25Search,
+  buildBm25,
+  fuseRanks,
+  queryTerms,
+  rankFiles,
+  renderRepoMap,
+  tokenize,
+  type Bm25Index,
+  type Chunk,
+  type FileEntry,
+  type ScanResult,
 };
 
-export interface FileEntry {
-  path: string; // forward-slash, relative to root
-  size: number;
-  mtimeMs: number;
-  language: string;
-  indexed: boolean;
-  lineCount: number;
-  imports: string[];
-  symbols: SymbolHit[];
-}
-
-export interface Chunk {
-  id: number;
-  path: string;
-  startLine: number;
-  endLine: number;
-  text: string;
-  /** Hash of file mtime+size, so vectors can be reused while a file is unchanged. */
-  fileKey: string;
-  tf: Map<string, number>;
-  len: number;
-}
-
-export interface ScanResult {
-  files: Map<string, FileEntry>;
-  chunks: Chunk[];
-  totalBytes: number;
-  truncated: boolean;
-  dirs: Set<string>;
-}
-
-/** Splits identifiers and paths into lowercase search terms (camelCase, snake_case, kebab-case). */
-export function tokenize(text: string): string[] {
-  const out: string[] = [];
-  for (const word of text.match(/[A-Za-z_$][A-Za-z0-9_$]*|\d+/g) ?? []) {
-    const lower = word.toLowerCase();
-    if (lower.length >= 2 && lower.length <= 40) out.push(lower);
-    const parts = word.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').split(/[\s_$]+/);
-    if (parts.length > 1) for (const p of parts) if (p.length >= 2) out.push(p.toLowerCase());
-  }
-  return out;
-}
-
-function addChunk(chunks: Chunk[], file: FileEntry, fileKey: string, lines: string[], start: number, end: number) {
-  const text = lines.slice(start, end).join('\n');
-  if (!text.trim()) return;
-  const tf = new Map<string, number>();
-  const terms = tokenize(text);
-  // File path terms make "payments" find payments.ts even when the body rarely repeats the word.
-  for (const t of tokenize(file.path)) terms.push(t, t);
-  for (const t of terms) tf.set(t, (tf.get(t) ?? 0) + 1);
-  chunks.push({ id: chunks.length, path: file.path, startLine: start + 1, endLine: end, text, fileKey, tf, len: terms.length });
-}
-
-function chunkFile(chunks: Chunk[], file: FileEntry, fileKey: string, content: string) {
-  const lines = content.split('\n');
-  const symbolLines = new Set(file.symbols.map((s) => s.line - 1));
-  let start = 0;
-  while (start < lines.length) {
-    let end = Math.min(lines.length, start + LIMITS.chunkTargetLines);
-    // Prefer to end just before the next symbol so a chunk holds whole functions where possible.
-    if (end < lines.length) {
-      const limit = Math.min(lines.length, start + LIMITS.chunkMaxLines);
-      for (let i = end; i < limit; i++) {
-        if (symbolLines.has(i)) {
-          end = i;
-          break;
-        }
+function readIgnoreForDir(dirAbs: string): IgnoreMatcher {
+  const m = new IgnoreMatcher();
+  for (const name of ['.gitignore', '.gemmaignore']) {
+    try {
+      const p = path.join(dirAbs, name);
+      const lst = fs.lstatSync(p);
+      if (!lst.isSymbolicLink() && lst.isFile() && lst.size < 200_000) {
+        m.add(fs.readFileSync(p, 'utf8'));
       }
-      for (let i = end; i > start + 12; i--) {
-        if (symbolLines.has(i)) {
-          end = i;
-          break;
-        }
-      }
+    } catch {
+      // no ignore file here
     }
-    addChunk(chunks, file, fileKey, lines, start, end);
-    if (end >= lines.length) break;
-    start = Math.max(start + 1, end - LIMITS.chunkOverlap);
   }
+  return m;
+}
+
+/** Evaluates .gitignore / .gemmaignore rules from `rootReal` down through all ancestor folders of `rel`. */
+export function isIgnoredPathOnDisk(
+  rootReal: string,
+  rel: string,
+  isDir: boolean,
+  cache = new Map<string, IgnoreMatcher>()
+): boolean {
+  const norm = rel.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  if (!norm) return false;
+  if (isDeniedPath(norm) || (isDir && isDeniedName(norm.split('/').pop()!, true))) return true;
+  const parts = norm.split('/');
+  if (parts.length > LIMITS.maxDepth + 1) return true;
+
+  const getMatcher = (relDir: string): IgnoreMatcher => {
+    let m = cache.get(relDir);
+    if (!m) {
+      m = readIgnoreForDir(relDir ? path.join(rootReal, ...relDir.split('/')) : rootReal);
+      cache.set(relDir, m);
+    }
+    return m;
+  };
+
+  for (let depth = 0; depth < parts.length; depth++) {
+    const base = parts.slice(0, depth).join('/');
+    const sub = parts.slice(depth).join('/');
+    const m = getMatcher(base);
+    if (m.ignores(sub, isDir)) return true;
+  }
+  return false;
+}
+
+function indexFileFromDisk(
+  rootReal: string,
+  rel: string,
+  abs: string,
+  st: fs.Stats,
+  previous?: FileEntry
+): { entry: FileEntry; chunks: Chunk[]; indexedBytes: number } {
+  const language = languageOf(rel);
+  const entry: FileEntry = {
+    path: rel,
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    language,
+    indexed: false,
+    lineCount: 0,
+    imports: [],
+    symbols: [],
+  };
+
+  if (isBinaryName(rel) || st.size > LIMITS.maxIndexBytes || st.size === 0) {
+    return { entry, chunks: [], indexedBytes: 0 };
+  }
+
+  let content: string;
+  try {
+    const buf = fs.readFileSync(abs);
+    if (looksBinaryBytes(buf)) return { entry, chunks: [], indexedBytes: 0 };
+    content = buf.toString('utf8');
+  } catch {
+    return { entry, chunks: [], indexedBytes: 0 };
+  }
+
+  const fileKey = `${st.size}:${Math.floor(st.mtimeMs)}`;
+  entry.indexed = true;
+  entry.lineCount = content.split('\n').length;
+  // Redact secrets before symbol extraction, import parsing, and chunking so secrets never surface in repo maps or search hits.
+  const redacted = redactSecrets(content).text;
+  if (previous && previous.indexed && `${previous.size}:${Math.floor(previous.mtimeMs)}` === fileKey) {
+    entry.symbols = previous.symbols;
+    entry.imports = previous.imports;
+  } else {
+    entry.symbols = extractSymbols(rel, language, redacted);
+    entry.imports = extractImports(language, redacted);
+  }
+  const chunks = buildFileChunks(entry, fileKey, redacted);
+  return { entry, chunks, indexedBytes: st.size };
 }
 
 export interface ScanOptions {
@@ -111,18 +148,7 @@ export function scanWorkspace(rootReal: string, opts: ScanOptions = {}): ScanRes
   let indexedBytes = 0;
   let truncated = false;
 
-  const rootIgnore = new IgnoreMatcher();
-  const readIgnore = (dirAbs: string, m: IgnoreMatcher) => {
-    for (const name of ['.gitignore', '.gemmaignore']) {
-      try {
-        const st = fs.statSync(path.join(dirAbs, name));
-        if (st.isFile() && st.size < 200_000) m.add(fs.readFileSync(path.join(dirAbs, name), 'utf8'));
-      } catch {
-        // no ignore file here
-      }
-    }
-  };
-  readIgnore(rootReal, rootIgnore);
+  const rootIgnore = readIgnoreForDir(rootReal);
 
   type Frame = { abs: string; rel: string; depth: number; ignores: Array<{ base: string; m: IgnoreMatcher }> };
   const stack: Frame[] = [{ abs: rootReal, rel: '', depth: 0, ignores: [{ base: '', m: rootIgnore }] }];
@@ -154,9 +180,7 @@ export function scanWorkspace(rootReal: string, opts: ScanOptions = {}): ScanRes
         dirs.add(rel);
         const abs = path.join(frame.abs, ent.name);
         const ignores = [...frame.ignores];
-        const local = new IgnoreMatcher();
-        readIgnore(abs, local);
-        ignores.push({ base: rel, m: local });
+        ignores.push({ base: rel, m: readIgnoreForDir(abs) });
         subDirs.push({ abs, rel, depth: frame.depth + 1, ignores });
         continue;
       }
@@ -165,48 +189,34 @@ export function scanWorkspace(rootReal: string, opts: ScanOptions = {}): ScanRes
         truncated = true;
         continue;
       }
+      const abs = path.join(frame.abs, ent.name);
       let st: fs.Stats;
       try {
-        st = fs.statSync(path.join(frame.abs, ent.name));
+        st = fs.statSync(abs);
       } catch {
         continue;
       }
       totalBytes += st.size;
-      const language = languageOf(rel);
-      const entry: FileEntry = {
-        path: rel, size: st.size, mtimeMs: st.mtimeMs, language,
-        indexed: false, lineCount: 0, imports: [], symbols: [],
-      };
-      files.set(rel, entry);
 
-      if (isBinaryName(rel) || st.size > LIMITS.maxIndexBytes || st.size === 0) continue;
       if (indexedBytes + st.size > LIMITS.maxTotalIndexBytes) {
-        truncated = true;
+        if (!isBinaryName(rel) && st.size <= LIMITS.maxIndexBytes && st.size > 0) truncated = true;
+        files.set(rel, {
+          path: rel,
+          size: st.size,
+          mtimeMs: st.mtimeMs,
+          language: languageOf(rel),
+          indexed: false,
+          lineCount: 0,
+          imports: [],
+          symbols: [],
+        });
         continue;
       }
-      const fileKey = `${st.size}:${Math.floor(st.mtimeMs)}`;
-      const prev = opts.previous?.files.get(rel);
-      let content: string;
-      try {
-        const buf = fs.readFileSync(path.join(frame.abs, ent.name));
-        if (looksBinary(buf)) continue;
-        content = buf.toString('utf8');
-      } catch {
-        continue;
-      }
-      indexedBytes += st.size;
-      entry.indexed = true;
-      entry.lineCount = content.split('\n').length;
-      // Redact secrets before symbol extraction, import parsing, and chunking so secrets never surface in repo maps or search hits.
-      const redacted = redactSecrets(content).text;
-      if (prev && prev.indexed && `${prev.size}:${Math.floor(prev.mtimeMs)}` === fileKey) {
-        entry.symbols = prev.symbols;
-        entry.imports = prev.imports;
-      } else {
-        entry.symbols = extractSymbols(rel, language, redacted);
-        entry.imports = extractImports(language, redacted);
-      }
-      chunkFile(chunks, entry, fileKey, redacted);
+
+      const indexed = indexFileFromDisk(rootReal, rel, abs, st, opts.previous?.files.get(rel));
+      files.set(rel, indexed.entry);
+      indexedBytes += indexed.indexedBytes;
+      for (const c of indexed.chunks) chunks.push(c);
     }
     for (let i = subDirs.length - 1; i >= 0; i--) stack.push(subDirs[i]);
   }
@@ -215,117 +225,157 @@ export function scanWorkspace(rootReal: string, opts: ScanOptions = {}): ScanRes
   return { files, chunks, totalBytes, truncated, dirs };
 }
 
-// ---- BM25 -----------------------------------------------------------------------------------
-
-export interface Bm25Index {
-  df: Map<string, number>;
-  avgLen: number;
-  n: number;
-}
-
-export function buildBm25(chunks: Chunk[]): Bm25Index {
-  const df = new Map<string, number>();
-  let total = 0;
-  for (const c of chunks) {
-    total += c.len;
-    for (const t of c.tf.keys()) df.set(t, (df.get(t) ?? 0) + 1);
-  }
-  return { df, avgLen: chunks.length ? total / chunks.length : 1, n: chunks.length };
-}
-
-const STOP = new Set(['the', 'and', 'for', 'how', 'what', 'why', 'does', 'this', 'that', 'with', 'from', 'are', 'is', 'in', 'of', 'to', 'a', 'it', 'on', 'do', 'be', 'can', 'my', 'me', 'we', 'you', 'about', 'please', 'explain', 'show', 'tell']);
-
-export function queryTerms(query: string): string[] {
-  const seen = new Set<string>();
-  for (const t of tokenize(query)) if (!STOP.has(t)) seen.add(t);
-  return [...seen];
-}
-
-export function bm25Search(chunks: Chunk[], idx: Bm25Index, query: string, limit: number): Array<{ chunk: Chunk; score: number }> {
-  const terms = queryTerms(query);
-  if (terms.length === 0 || idx.n === 0) return [];
-  const k1 = 1.4;
-  const b = 0.75;
-  const scored: Array<{ chunk: Chunk; score: number }> = [];
-  for (const chunk of chunks) {
-    let score = 0;
-    for (const t of terms) {
-      const f = chunk.tf.get(t);
-      if (!f) continue;
-      const n = idx.df.get(t) ?? 0;
-      const idf = Math.log(1 + (idx.n - n + 0.5) / (n + 0.5));
-      score += (idf * (f * (k1 + 1))) / (f + k1 * (1 - b + (b * chunk.len) / idx.avgLen));
+/**
+ * Incrementally applies changed, added, or deleted relative paths to an existing `ScanResult`
+ * (used by the chokidar file watcher). Falls back to a full scan only if an ignore file changed.
+ */
+export function applyIncrementalChanges(
+  rootReal: string,
+  scan: ScanResult,
+  dirtyRelPaths: Iterable<string>
+): ScanResult {
+  const dirty = new Set<string>();
+  for (const raw of dirtyRelPaths) {
+    const norm = raw.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    if (!norm || norm === '.' || norm.split('/').includes('..')) continue;
+    const base = norm.slice(norm.lastIndexOf('/') + 1);
+    if (base === '.gitignore' || base === '.gemmaignore') {
+      return scanWorkspace(rootReal, { previous: scan });
     }
-    if (score > 0) scored.push({ chunk, score });
+    dirty.add(norm);
   }
-  scored.sort((a, b2) => b2.score - a.score);
-  return scored.slice(0, limit);
-}
+  if (dirty.size === 0) return scan;
 
-/** Reciprocal rank fusion of several ranked lists of chunk ids. */
-export function fuseRanks(lists: number[][], k = 60): Map<number, number> {
-  const out = new Map<number, number>();
-  for (const list of lists) list.forEach((id, rank) => out.set(id, (out.get(id) ?? 0) + 1 / (k + rank + 1)));
-  return out;
-}
+  const ignoreCache = new Map<string, IgnoreMatcher>();
+  const touchedFiles = new Set<string>();
+  const removedPrefixes: string[] = [];
+  const addedOrUpdatedChunks = new Map<string, Chunk[]>();
+  let truncated = scan.truncated;
 
-// ---- repo map --------------------------------------------------------------------------------
+  // Approximate current indexed bytes so incremental adds respect the workspace ceiling.
+  let currentIndexedBytes = 0;
+  for (const f of scan.files.values()) if (f.indexed) currentIndexedBytes += f.size;
 
-function importTarget(from: string, spec: string, files: Map<string, FileEntry>): string | null {
-  if (!spec.startsWith('.')) return null;
-  const base = path.posix.normalize(path.posix.join(path.posix.dirname(from), spec));
-  const candidates = [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`, `${base}.mjs`, `${base}.py`, `${base}/index.ts`, `${base}/index.tsx`, `${base}/index.js`, `${base}/__init__.py`];
-  for (const c of candidates) if (files.has(c)) return c;
-  // TypeScript sources imported as "./x.ts" or "./x.js"
-  const stripped = base.replace(/\.(js|mjs)$/, '');
-  for (const ext of ['.ts', '.tsx']) if (files.has(stripped + ext)) return stripped + ext;
-  return null;
-}
+  for (const rel of dirty) {
+    const abs = path.join(rootReal, ...rel.split('/'));
+    let lst: fs.Stats | null = null;
+    try {
+      lst = fs.lstatSync(abs);
+    } catch {
+      lst = null;
+    }
 
-export function rankFiles(files: Map<string, FileEntry>, focus: string[] = []): FileEntry[] {
-  const inbound = new Map<string, number>();
-  for (const f of files.values()) {
-    for (const spec of f.imports) {
-      const target = importTarget(f.path, spec, files);
-      if (target && target !== f.path) inbound.set(target, (inbound.get(target) ?? 0) + 1);
+    // Remove or skip missing paths, symlinks, paths escaping rootReal, denied names, and ignored paths.
+    let validDir = false;
+    let validFile = false;
+    let realPath = '';
+    if (lst && !lst.isSymbolicLink()) {
+      try {
+        realPath = fs.realpathSync(abs);
+      } catch {
+        realPath = '';
+      }
+      if (realPath && (realPath === rootReal || realPath.startsWith(rootReal + path.sep))) {
+        if (lst.isDirectory()) {
+          if (!isIgnoredPathOnDisk(rootReal, rel, true, ignoreCache)) validDir = true;
+        } else if (lst.isFile()) {
+          if (!isIgnoredPathOnDisk(rootReal, rel, false, ignoreCache)) validFile = true;
+        }
+      }
+    }
+
+    if (!validDir && !validFile) {
+      if (scan.files.has(rel)) {
+        const prev = scan.files.get(rel)!;
+        if (prev.indexed) currentIndexedBytes -= prev.size;
+        scan.files.delete(rel);
+        touchedFiles.add(rel);
+      }
+      if (scan.dirs.has(rel)) {
+        scan.dirs.delete(rel);
+        removedPrefixes.push(`${rel}/`);
+      } else if (!lst) {
+        // An unlinked directory might already be absent from dirs or have files underneath it.
+        const prefix = `${rel}/`;
+        for (const fPath of scan.files.keys()) {
+          if (fPath.startsWith(prefix)) {
+            removedPrefixes.push(prefix);
+            break;
+          }
+        }
+      }
+      continue;
+    }
+
+    if (validDir) {
+      const depth = rel.split('/').length;
+      if (depth <= LIMITS.maxDepth) scan.dirs.add(rel);
+      else truncated = true;
+      continue;
+    }
+
+    // validFile
+    if (!scan.files.has(rel) && scan.files.size >= LIMITS.maxFiles) {
+      truncated = true;
+      continue;
+    }
+    const prev = scan.files.get(rel);
+    if (prev?.indexed) currentIndexedBytes -= prev.size;
+    touchedFiles.add(rel);
+
+    const st = fs.statSync(realPath);
+    if (currentIndexedBytes + st.size > LIMITS.maxTotalIndexBytes) {
+      if (!isBinaryName(rel) && st.size <= LIMITS.maxIndexBytes && st.size > 0) truncated = true;
+      scan.files.set(rel, {
+        path: rel,
+        size: st.size,
+        mtimeMs: st.mtimeMs,
+        language: languageOf(rel),
+        indexed: false,
+        lineCount: 0,
+        imports: [],
+        symbols: [],
+      });
+      continue;
+    }
+
+    const indexed = indexFileFromDisk(rootReal, rel, realPath, st, prev);
+    scan.files.set(rel, indexed.entry);
+    currentIndexedBytes += indexed.indexedBytes;
+    if (indexed.chunks.length > 0) addedOrUpdatedChunks.set(rel, indexed.chunks);
+  }
+
+  if (removedPrefixes.length > 0) {
+    for (const d of [...scan.dirs]) {
+      if (removedPrefixes.some((p) => d.startsWith(p))) scan.dirs.delete(d);
+    }
+    for (const fPath of [...scan.files.keys()]) {
+      if (removedPrefixes.some((p) => fPath.startsWith(p))) {
+        scan.files.delete(fPath);
+        touchedFiles.add(fPath);
+      }
     }
   }
-  const newest = Math.max(1, ...[...files.values()].map((f) => f.mtimeMs));
-  const oldest = Math.min(newest, ...[...files.values()].map((f) => f.mtimeMs));
-  const span = Math.max(1, newest - oldest);
-  const focusSet = new Set(focus);
-  const score = (f: FileEntry) => {
-    let s = Math.log2(1 + (inbound.get(f.path) ?? 0)) * 2;
-    s += ((f.mtimeMs - oldest) / span) * 1.5;
-    if (focusSet.has(f.path)) s += 10;
-    else if (focus.some((p) => path.posix.dirname(p) === path.posix.dirname(f.path))) s += 1.5;
-    if (/(^|\/)(index|main|app|server)\.[a-z]+$/.test(f.path)) s += 1;
-    if (/(^|\/)(tests?|__tests__|spec)\//.test(f.path) || /\.(test|spec)\./.test(f.path)) s -= 1.5;
-    return s;
+
+  const nextChunks: Chunk[] = [];
+  for (const c of scan.chunks) {
+    if (touchedFiles.has(c.path)) continue;
+    if (removedPrefixes.some((p) => c.path.startsWith(p))) continue;
+    nextChunks.push(c);
+  }
+  for (const list of addedOrUpdatedChunks.values()) {
+    for (const c of list) nextChunks.push(c);
+  }
+  nextChunks.forEach((c, i) => (c.id = i));
+
+  let totalBytes = 0;
+  for (const f of scan.files.values()) totalBytes += f.size;
+
+  return {
+    files: scan.files,
+    chunks: nextChunks,
+    totalBytes,
+    truncated,
+    dirs: scan.dirs,
   };
-  return [...files.values()].filter((f) => f.indexed && f.symbols.length > 0).sort((a, b) => score(b) - score(a) || a.path.localeCompare(b.path));
-}
-
-export function renderRepoMap(files: Map<string, FileEntry>, maxTokens: number, focus: string[] = []): { text: string; files: number; symbols: number } {
-  const maxChars = Math.max(400, Math.floor(maxTokens * 3.2));
-  const ranked = rankFiles(files, focus);
-  const out: string[] = [];
-  let used = 0;
-  let nFiles = 0;
-  let nSyms = 0;
-  for (const f of ranked) {
-    const top = f.symbols.filter((s) => s.kind !== 'method' || f.language !== 'typescript').slice(0, 12);
-    const block = [f.path, ...top.map((s) => `  ${s.signature.slice(0, 100)}`)].join('\n');
-    if (used + block.length + 1 > maxChars) {
-      if (nFiles === 0) continue;
-      break;
-    }
-    out.push(block);
-    used += block.length + 1;
-    nFiles++;
-    nSyms += top.length;
-  }
-  const remaining = ranked.length - nFiles;
-  if (remaining > 0) out.push(`… plus ${remaining} more source files not shown`);
-  return { text: out.join('\n'), files: nFiles, symbols: nSyms };
 }

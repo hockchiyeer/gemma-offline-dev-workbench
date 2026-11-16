@@ -1,6 +1,7 @@
+import { parseBrowserWorkspaceName } from './browserWorkspace';
 import type { ContextBlock } from './contextEngine';
 import { estimateTokens } from './tokenEstimate';
-import type { WorkspaceConnection } from './workspaceClient';
+import type { WorkspaceConnectionLike } from './workspaceClient';
 import type {
   ChatAttachmentRef,
   ChatWorkspace,
@@ -74,6 +75,7 @@ export function removeMention(
 
 export interface BuildCandidatesOptions {
   workspace: boolean;
+  gitAvailable?: boolean;
   files?: FileListItem[];
   dirs?: string[];
   symbols?: SymbolHit[];
@@ -125,19 +127,21 @@ export function buildMentionCandidates(query: string, opts: BuildCandidatesOptio
       });
     }
 
-    const gitOptions: Array<{ id: 'diff' | 'status'; title: string; detail: string; keywords: string }> = [
-      { id: 'diff', title: 'git:diff', detail: 'Uncommitted Git changes', keywords: 'git diff changes' },
-      { id: 'status', title: 'git:status', detail: 'Git branch and file status', keywords: 'git status branch' },
-    ];
-    for (const g of gitOptions) {
-      if (!q || g.title.includes(q) || g.keywords.includes(q) || g.id.startsWith(q)) {
-        out.push({
-          key: `git:${g.id}`,
-          ref: { kind: 'git', id: g.id, title: g.title },
-          label: g.title,
-          detail: g.detail,
-          category: 'Git',
-        });
+    if (opts.gitAvailable !== false) {
+      const gitOptions: Array<{ id: 'diff' | 'status'; title: string; detail: string; keywords: string }> = [
+        { id: 'diff', title: 'git:diff', detail: 'Uncommitted Git changes', keywords: 'git diff changes' },
+        { id: 'status', title: 'git:status', detail: 'Git branch and file status', keywords: 'git status branch' },
+      ];
+      for (const g of gitOptions) {
+        if (!q || g.title.includes(q) || g.keywords.includes(q) || g.id.startsWith(q)) {
+          out.push({
+            key: `git:${g.id}`,
+            ref: { kind: 'git', id: g.id, title: g.title },
+            label: g.title,
+            detail: g.detail,
+            category: 'Git',
+          });
+        }
       }
     }
   }
@@ -213,14 +217,8 @@ function langFromPath(rel: string): string {
   return EXT_FENCE_LANG[ext] ?? (ext || 'text');
 }
 
-function workspaceBasename(rootPath: string): string {
-  const cleaned = rootPath.replace(/[\\/]+$/, '');
-  const parts = cleaned.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] || cleaned || 'workspace';
-}
-
 export interface GatherWorkspaceOptions {
-  conn: WorkspaceConnection;
+  conn: WorkspaceConnectionLike;
   workspace: ChatWorkspace;
   question: string;
   refs: ChatAttachmentRef[];
@@ -319,7 +317,7 @@ export async function gatherWorkspaceContext(opts: GatherWorkspaceOptions): Prom
   }
 
   // 3. Repo map outline
-  const workspaceName = workspaceBasename(workspace.path);
+  const workspaceName = workspace.name || parseBrowserWorkspaceName(workspace.path);
   if (workspace.repoMap && mapTokens >= 100) {
     try {
       const mapRes = await conn.repoMap(mapTokens, [...coveredPaths], signal);

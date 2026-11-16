@@ -81,6 +81,7 @@ export interface ChatAttachmentRef {
 
 export interface ChatWorkspace {
   path: string;
+  name?: string;
   repoMap: boolean;
   autoRetrieve: boolean;
 }

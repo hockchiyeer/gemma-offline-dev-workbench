@@ -16,6 +16,8 @@ export interface WorkspaceInfo {
   truncated: boolean;
   isGit: boolean;
   indexedAt: number;
+  watching?: boolean;
+  source?: 'server' | 'browser';
   embeddings: {
     model: string;
     embedded: number;

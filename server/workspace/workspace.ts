@@ -1,30 +1,25 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { watch as watchFiles, type FSWatcher } from 'chokidar';
 import type {
   EmbeddingSetting, FileListResult, FileRead, GitOp, GitResult, RepoMapResult, SearchHit, SearchMode,
   SearchResult, SymbolHit, TreeEntry, WorkspaceInfo,
 } from '../../src/types/workspace.ts';
 import {
-  LIMITS, bm25Search, buildBm25, fuseRanks, renderRepoMap, scanWorkspace,
+  dotProduct, embedTexts, isLoopbackHttpUrl, scorePath, vecKey,
+} from '../../src/lib/workspaceCore.ts';
+import {
+  LIMITS, applyIncrementalChanges, bm25Search, buildBm25, fuseRanks, renderRepoMap, scanWorkspace,
   type Bm25Index, type Chunk, type ScanResult,
 } from './indexer.ts';
 import { WorkspaceError, isDeniedPath, languageOf, looksBinary, redactSecrets, resolveInside, resolveRoot } from './safety.ts';
 
+export { isLoopbackHttpUrl, scorePath };
+
 const REFRESH_AFTER_MS = 20_000;
 const MAX_EMBED_CHUNKS = 4000;
 const EMBED_BATCH = 16;
-
-export function isLoopbackHttpUrl(raw: string): boolean {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    if (u.username || u.password) return false;
-    return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(u.hostname.toLowerCase());
-  } catch {
-    return false;
-  }
-}
 
 interface WorkspaceState {
   root: string;
@@ -34,59 +29,98 @@ interface WorkspaceState {
   scannedAt: number;
   vectors: Map<string, Float32Array>; // key: path:startLine:fileKey
   embed: { setting: EmbeddingSetting | null; state: 'idle' | 'running' | 'error' | 'off'; error?: string; token: number };
+  watcher?: FSWatcher;
+  watcherActive: boolean;
+  pendingDirty: Set<string>;
+  debounceTimer?: ReturnType<typeof setTimeout>;
+  closed?: boolean;
 }
 
 export interface WorkspaceManagerOptions {
   fetchImpl?: typeof fetch;
   gitTimeoutMs?: number;
-}
-
-const vecKey = (c: Chunk) => `${c.path}:${c.startLine}:${c.fileKey}`;
-
-function normalize(v: number[]): Float32Array {
-  const out = new Float32Array(v.length);
-  let norm = 0;
-  for (const x of v) norm += x * x;
-  norm = Math.sqrt(norm) || 1;
-  for (let i = 0; i < v.length; i++) out[i] = v[i] / norm;
-  return out;
-}
-
-function dot(a: Float32Array, b: Float32Array): number {
-  const n = Math.min(a.length, b.length);
-  let s = 0;
-  for (let i = 0; i < n; i++) s += a[i] * b[i];
-  return s;
-}
-
-/** Subsequence-aware path scoring for @-mention autocomplete. Higher is better; 0 = no match. */
-export function scorePath(rel: string, query: string): number {
-  const q = query.toLowerCase();
-  const p = rel.toLowerCase();
-  if (!q) return 1;
-  const base = p.slice(p.lastIndexOf('/') + 1);
-  if (base === q) return 100;
-  if (base.startsWith(q)) return 80 - Math.min(20, base.length - q.length);
-  if (base.includes(q)) return 60 - Math.min(20, base.length - q.length);
-  if (p.includes(q)) return 40 - Math.min(20, p.length / 10);
-  // fuzzy subsequence on the whole path
-  let qi = 0;
-  let gaps = 0;
-  let last = -1;
-  for (let i = 0; i < p.length && qi < q.length; i++) {
-    if (p[i] === q[qi]) {
-      if (last >= 0 && i - last > 1) gaps++;
-      last = i;
-      qi++;
-    }
-  }
-  return qi === q.length ? Math.max(1, 25 - gaps * 3) : 0;
+  /** Enable real-time chokidar watching (defaults to true). */
+  watch?: boolean;
+  /** Debounce delay in ms before flushing file watcher events (defaults to 120). */
+  watchDebounceMs?: number;
 }
 
 export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
   const doFetch = options.fetchImpl ?? fetch;
   const gitTimeout = options.gitTimeoutMs ?? 8000;
+  const watchEnabled = options.watch !== false;
+  const watchDebounceMs = Math.max(20, options.watchDebounceMs ?? 120);
   const states = new Map<string, WorkspaceState>();
+
+  const stopWatcher = (st: WorkspaceState) => {
+    st.closed = true;
+    if (st.debounceTimer) {
+      clearTimeout(st.debounceTimer);
+      st.debounceTimer = undefined;
+    }
+    st.pendingDirty.clear();
+    st.watcherActive = false;
+    const w = st.watcher;
+    st.watcher = undefined;
+    if (w) void w.close().catch(() => {});
+  };
+
+  const flushPending = (st: WorkspaceState): boolean => {
+    if (st.debounceTimer) {
+      clearTimeout(st.debounceTimer);
+      st.debounceTimer = undefined;
+    }
+    if (st.closed || st.pendingDirty.size === 0) return false;
+    const dirty = [...st.pendingDirty];
+    st.pendingDirty.clear();
+    st.scan = applyIncrementalChanges(st.root, st.scan, dirty);
+    st.bm25 = buildBm25(st.scan.chunks);
+    st.scannedAt = Date.now();
+    if (st.embed.setting) void runEmbedding(st);
+    return true;
+  };
+
+  const startWatcher = (st: WorkspaceState) => {
+    if (!watchEnabled || st.watcher) return;
+    try {
+      const watcher = watchFiles(st.root, {
+        ignoreInitial: true,
+        persistent: false,
+        followSymlinks: false,
+        depth: LIMITS.maxDepth,
+        ignored: (absPath, stats) => {
+          if (stats?.isSymbolicLink?.()) return true;
+          const rel = path.relative(st.root, absPath).split(path.sep).join('/');
+          if (!rel || rel === '.') return false;
+          if (rel.startsWith('..')) return true;
+          return isDeniedPath(rel);
+        },
+      });
+      const enqueue = (absPath: string) => {
+        if (st.closed) return;
+        const rel = path.relative(st.root, absPath).split(path.sep).join('/');
+        if (!rel || rel === '.' || rel.startsWith('..') || isDeniedPath(rel)) return;
+        st.pendingDirty.add(rel);
+        if (st.debounceTimer) clearTimeout(st.debounceTimer);
+        st.debounceTimer = setTimeout(() => {
+          flushPending(st);
+        }, watchDebounceMs);
+        st.debounceTimer.unref?.();
+      };
+      watcher.on('all', (event, absPath) => {
+        if (event === 'add' || event === 'change' || event === 'unlink' || event === 'addDir' || event === 'unlinkDir') {
+          enqueue(absPath);
+        }
+      });
+      watcher.on('error', () => {
+        st.watcherActive = false;
+      });
+      st.watcher = watcher;
+      st.watcherActive = true;
+    } catch {
+      st.watcherActive = false;
+    }
+  };
 
   const buildState = (root: string, previous?: WorkspaceState): WorkspaceState => {
     const scan = scanWorkspace(root, { previous: previous?.scan });
@@ -98,6 +132,11 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
       scannedAt: Date.now(),
       vectors: previous?.vectors ?? new Map(),
       embed: previous?.embed ?? { setting: null, state: 'off', token: 0 },
+      watcher: previous?.watcher,
+      watcherActive: previous?.watcherActive ?? false,
+      pendingDirty: previous?.pendingDirty ?? new Set(),
+      debounceTimer: previous?.debounceTimer,
+      closed: false,
     };
   };
 
@@ -109,6 +148,11 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
   };
 
   const fresh = (st: WorkspaceState): WorkspaceState => {
+    if (st.pendingDirty.size > 0) {
+      flushPending(st);
+      return st;
+    }
+    if (st.watcherActive && Date.now() - st.scannedAt < REFRESH_AFTER_MS * 3) return st;
     if (Date.now() - st.scannedAt < REFRESH_AFTER_MS) return st;
     const next = buildState(st.root, st);
     states.set(st.root, next);
@@ -117,26 +161,6 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
   };
 
   // ---- embeddings -------------------------------------------------------------------------------
-
-  async function embedTexts(setting: EmbeddingSetting, input: string[]): Promise<Float32Array[]> {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 60_000);
-    try {
-      const res = await doFetch(new URL('/api/embed', setting.baseUrl).toString(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: setting.model, input }),
-        signal: ctl.signal,
-        redirect: 'error',
-      });
-      if (!res.ok) throw new Error(`Embedding model returned HTTP ${res.status}. Is "${setting.model}" installed (ollama pull ${setting.model})?`);
-      const json = (await res.json()) as { embeddings?: number[][] };
-      if (!Array.isArray(json.embeddings) || json.embeddings.length !== input.length) throw new Error('Embedding model returned an unexpected response.');
-      return json.embeddings.map(normalize);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
 
   async function runEmbedding(st: WorkspaceState): Promise<void> {
     const setting = st.embed.setting;
@@ -150,9 +174,13 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
       for (const k of st.vectors.keys()) if (!wanted.has(k)) st.vectors.delete(k);
       const todo = [...wanted.entries()].filter(([k]) => !st.vectors.has(k));
       for (let i = 0; i < todo.length; i += EMBED_BATCH) {
-        if (st.embed.token !== token || st.embed.setting !== setting) return; // superseded or closed
+        if (st.closed || st.embed.token !== token || st.embed.setting !== setting) return;
         const batch = todo.slice(i, i + EMBED_BATCH);
-        const vecs = await embedTexts(setting, batch.map(([, c]) => `${c.path}\n${c.text}`.slice(0, 1800)));
+        const vecs = await embedTexts(
+          setting,
+          batch.map(([, c]) => `${c.path}\n${c.text}`.slice(0, 1800)),
+          doFetch
+        );
         batch.forEach(([k], j) => st.vectors.set(k, vecs[j]));
       }
       st.embed.state = 'idle';
@@ -173,6 +201,8 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
     truncated: st.scan.truncated,
     isGit: fs.existsSync(path.join(st.root, '.git')),
     indexedAt: st.scannedAt,
+    watching: st.watcherActive,
+    source: 'server',
     embeddings: {
       model: st.embed.setting?.model ?? '',
       embedded: st.vectors.size,
@@ -183,7 +213,9 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
   });
 
   function setEmbedding(st: WorkspaceState, setting: EmbeddingSetting | null | undefined) {
-    const next = setting && setting.model.trim() && isLoopbackHttpUrl(setting.baseUrl) ? { baseUrl: setting.baseUrl.replace(/\/+$/, ''), model: setting.model.trim() } : null;
+    const next = setting && setting.model.trim() && isLoopbackHttpUrl(setting.baseUrl)
+      ? { baseUrl: setting.baseUrl.replace(/\/+$/, ''), model: setting.model.trim() }
+      : null;
     const cur = st.embed.setting;
     if (cur?.model === next?.model && cur?.baseUrl === next?.baseUrl) return;
     st.vectors.clear();
@@ -194,15 +226,36 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
   return {
     async open(rawPath: string, embedding?: EmbeddingSetting | null): Promise<WorkspaceInfo> {
       const root = resolveRoot(rawPath);
-      let st = states.get(root);
-      st = buildState(root, st);
+      const prev = states.get(root);
+      const st = buildState(root, prev);
       states.set(root, st);
+      startWatcher(st);
       setEmbedding(st, embedding);
       return info(st);
     },
 
     close(rawPath: string): void {
-      states.delete(resolveRoot(rawPath));
+      const root = resolveRoot(rawPath);
+      const st = states.get(root);
+      if (st) stopWatcher(st);
+      states.delete(root);
+    },
+
+    async closeAll(): Promise<void> {
+      const closers: Promise<void>[] = [];
+      for (const st of states.values()) {
+        st.closed = true;
+        if (st.debounceTimer) clearTimeout(st.debounceTimer);
+        st.pendingDirty.clear();
+        st.watcherActive = false;
+        if (st.watcher) {
+          const w = st.watcher;
+          st.watcher = undefined;
+          closers.push(w.close().catch(() => {}));
+        }
+      }
+      states.clear();
+      await Promise.all(closers);
     },
 
     info(rawRoot: string, embedding?: EmbeddingSetting | null): WorkspaceInfo {
@@ -222,7 +275,12 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
         .slice(0, lim)
         .map(({ f }) => ({ path: f.path, size: f.size, language: f.language }));
       const dirs = q
-        ? [...st.scan.dirs].map((d) => ({ d, s: scorePath(d, q) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s || a.d.localeCompare(b.d)).slice(0, 4).map((x) => x.d)
+        ? [...st.scan.dirs]
+            .map((d) => ({ d, s: scorePath(d, q) }))
+            .filter((x) => x.s > 0)
+            .sort((a, b) => b.s - a.s || a.d.localeCompare(b.d))
+            .slice(0, 4)
+            .map((x) => x.d)
         : [];
       return { files, dirs };
     },
@@ -287,7 +345,10 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
           scored.push({ s, score: score - Math.min(10, n.length - q.length) / 2 });
         }
       }
-      return scored.sort((a, b) => b.score - a.score || a.s.path.localeCompare(b.s.path)).slice(0, Math.max(1, Math.min(20, limit))).map((x) => x.s);
+      return scored
+        .sort((a, b) => b.score - a.score || a.s.path.localeCompare(b.s.path))
+        .slice(0, Math.max(1, Math.min(20, limit)))
+        .map((x) => x.s);
     },
 
     async search(rawRoot: string, query: string, mode: SearchMode = 'hybrid', limit = 6, embedding?: EmbeddingSetting | null): Promise<SearchResult> {
@@ -302,10 +363,10 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
       let semantic: Array<{ chunk: Chunk; score: number }> = [];
       if (mode !== 'lexical' && st.embed.setting && st.vectors.size > 0) {
         try {
-          const [qv] = await embedTexts(st.embed.setting, [q.slice(0, 1800)]);
+          const [qv] = await embedTexts(st.embed.setting, [q.slice(0, 1800)], doFetch);
           for (const c of st.scan.chunks) {
             const v = st.vectors.get(vecKey(c));
-            if (v) semantic.push({ chunk: c, score: dot(qv, v) });
+            if (v) semantic.push({ chunk: c, score: dotProduct(qv, v) });
           }
           semantic.sort((a, b) => b.score - a.score);
           semantic = semantic.slice(0, lim * 4).filter((x) => x.score > 0.2);
@@ -315,9 +376,10 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
       }
 
       const usedSemantic = semantic.length > 0;
-      const rankedIds = (usedSemantic && lexical.length > 0)
-        ? fuseRanks([lexical.map((x) => x.chunk.id), semantic.map((x) => x.chunk.id)])
-        : new Map((usedSemantic ? semantic : lexical).map((x, i) => [x.chunk.id, 1 / (60 + i + 1)]));
+      const rankedIds =
+        usedSemantic && lexical.length > 0
+          ? fuseRanks([lexical.map((x) => x.chunk.id), semantic.map((x) => x.chunk.id)])
+          : new Map((usedSemantic ? semantic : lexical).map((x, i) => [x.chunk.id, 1 / (60 + i + 1)]));
       const inLex = new Set(lexical.map((x) => x.chunk.id));
       const inSem = new Set(semantic.map((x) => x.chunk.id));
       const best = [...rankedIds.entries()].sort((a, b) => b[1] - a[1]);
@@ -331,7 +393,10 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
         if (n >= 1) continue;
         perFile.set(c.path, n + 1);
         hits.push({
-          path: c.path, startLine: c.startLine, endLine: c.endLine, text: c.text,
+          path: c.path,
+          startLine: c.startLine,
+          endLine: c.endLine,
+          text: c.text,
           score: Number(score.toFixed(5)),
           via: inLex.has(id) && inSem.has(id) ? 'both' : inSem.has(id) ? 'semantic' : 'lexical',
         });
@@ -356,7 +421,9 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
       const run = (args: string[]) =>
         new Promise<string>((resolve, reject) => {
           execFile('git', [...base, ...args], {
-            cwd: st.root, timeout: gitTimeout, maxBuffer: 4_000_000,
+            cwd: st.root,
+            timeout: gitTimeout,
+            maxBuffer: 4_000_000,
             env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
           }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
         });

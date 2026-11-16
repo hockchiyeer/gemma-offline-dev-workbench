@@ -36,6 +36,12 @@ import {
 } from '../lib/editProposal';
 import { inputBudgetTokens, planCompaction } from '../lib/contextEngine';
 import { estimateMessagesTokens, estimateTokens, getCalibration, recordCalibrationSample } from '../lib/tokenEstimate';
+import {
+  BrowserWorkspaceConnection,
+  isBrowserWorkspacePath,
+  pickBrowserWorkspaceDirectory,
+  registerBrowserFileSnapshot,
+} from '../lib/browserWorkspace';
 import { embeddingSettingFor, useWorkspace } from '../lib/useWorkspace';
 import { WorkspaceConnection } from '../lib/workspaceClient';
 import {
@@ -437,13 +443,14 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     const remote = mentionRemote && mentionRemote.query === mention.query ? mentionRemote : null;
     return buildMentionCandidates(mention.query, {
       workspace: Boolean(mentionConn && activeSession?.workspace),
+      gitAvailable: wsState.info?.isGit,
       files: remote?.files,
       dirs: remote?.dirs,
       symbols: remote?.symbols,
       snippets,
       docs,
     });
-  }, [mention, mentionRemote, mentionConn, activeSession?.workspace, snippets, docs]);
+  }, [mention, mentionRemote, mentionConn, activeSession?.workspace, wsState.info?.isGit, snippets, docs]);
 
   // Silent when nothing matches, so an "@word" in ordinary prose does not pop up an empty box.
   const mentionOpen =
@@ -480,7 +487,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   };
 
   const knownWorkspacePaths = useMemo(
-    () => [...new Set(sessions.map((x) => x.workspace?.path).filter((p): p is string => Boolean(p)))],
+    () =>
+      [...new Set(sessions.map((x) => x.workspace?.path).filter((p): p is string => Boolean(p && !isBrowserWorkspacePath(p))))],
     [sessions]
   );
 
@@ -504,7 +512,44 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     }
   };
 
+  const handlePickBrowserFolder = async () => {
+    setOpening(true);
+    setOpenError(null);
+    try {
+      const picked = await pickBrowserWorkspaceDirectory();
+      const info = await new BrowserWorkspaceConnection(picked.root, embedding).open();
+      persistWorkspace({ path: info.rootPath, name: info.name, repoMap: true, autoRetrieve: true });
+      setWorkspacePreview(null);
+      setExcludedKeys(new Set());
+    } catch (e) {
+      if (e && typeof e === 'object' && (e as { name?: string }).name === 'AbortError') return;
+      setOpenError(e instanceof Error ? e.message : 'Could not open that browser folder.');
+    } finally {
+      setOpening(false);
+    }
+  };
+
+  const handlePickBrowserFiles = async (files: FileList) => {
+    setOpening(true);
+    setOpenError(null);
+    try {
+      const picked = registerBrowserFileSnapshot(files);
+      const info = await new BrowserWorkspaceConnection(picked.root, embedding).open();
+      persistWorkspace({ path: info.rootPath, name: info.name, repoMap: true, autoRetrieve: true });
+      setWorkspacePreview(null);
+      setExcludedKeys(new Set());
+    } catch (e) {
+      if (e && typeof e === 'object' && (e as { name?: string }).name === 'AbortError') return;
+      setOpenError(e instanceof Error ? e.message : 'Could not open that browser folder.');
+    } finally {
+      setOpening(false);
+    }
+  };
+
   const handleCloseWorkspace = () => {
+    if (activeSession?.workspace?.path && isBrowserWorkspacePath(activeSession.workspace.path)) {
+      void new BrowserWorkspaceConnection(activeSession.workspace.path, embedding).close().catch(() => {});
+    }
     persistWorkspace(undefined);
     setWorkspacePreview(null);
     setExcludedKeys(new Set());
@@ -1845,6 +1890,10 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
         <div className="mx-auto max-w-3xl space-y-2.5">
           <WorkspaceBar
             available={wsState.available}
+            serverAvailable={wsState.serverAvailable}
+            browserAvailable={wsState.browserAvailable}
+            directPickerAvailable={wsState.directPickerAvailable}
+            needsPermission={wsState.needsPermission}
             workspace={activeSession?.workspace}
             info={wsState.info}
             connecting={wsState.connecting}
@@ -1858,6 +1907,9 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             excluded={excludedKeys}
             busy={streaming || compacting || gathering}
             onOpen={(p) => void handleOpenWorkspace(p)}
+            onPickBrowser={() => void handlePickBrowserFolder()}
+            onPickBrowserFiles={(files) => void handlePickBrowserFiles(files)}
+            onReconnectBrowser={() => void wsState.reconnectBrowser()}
             onClose={handleCloseWorkspace}
             onToggle={handleToggleWorkspace}
             onPreview={() => void handlePreviewWorkspace()}

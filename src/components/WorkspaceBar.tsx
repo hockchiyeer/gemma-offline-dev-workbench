@@ -1,5 +1,11 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { Eye, FolderGit2, FolderOpen, Loader2, X } from 'lucide-react';
+import {
+  canUseDirectDirectoryPicker,
+  isBrowserSnapshotPath,
+  isBrowserWorkspacePath,
+  parseBrowserWorkspaceName,
+} from '../lib/browserWorkspace';
 import type { GatheredContext } from '../lib/workspaceContext';
 import type { ChatWorkspace } from '../types/vault';
 import type { WorkspaceInfo } from '../types/workspace';
@@ -11,6 +17,10 @@ export interface WorkspacePreview {
 
 interface WorkspaceBarProps {
   available: boolean;
+  serverAvailable?: boolean;
+  browserAvailable?: boolean;
+  directPickerAvailable?: boolean;
+  needsPermission?: boolean;
   workspace?: ChatWorkspace;
   info: WorkspaceInfo | null;
   connecting: boolean;
@@ -24,6 +34,9 @@ interface WorkspaceBarProps {
   excluded: Set<string>;
   busy: boolean;
   onOpen: (path: string) => void;
+  onPickBrowser?: () => void;
+  onPickBrowserFiles?: (files: FileList) => void;
+  onReconnectBrowser?: () => void;
   onClose: () => void;
   onToggle: (key: 'repoMap' | 'autoRetrieve', value: boolean) => void;
   onPreview: () => void;
@@ -32,6 +45,10 @@ interface WorkspaceBarProps {
 
 export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   available,
+  serverAvailable = true,
+  browserAvailable = false,
+  directPickerAvailable = false,
+  needsPermission = false,
   workspace,
   info,
   connecting,
@@ -45,6 +62,9 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   excluded,
   busy,
   onOpen,
+  onPickBrowser,
+  onPickBrowserFiles,
+  onReconnectBrowser,
   onClose,
   onToggle,
   onPreview,
@@ -53,6 +73,15 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   const [formOpen, setFormOpen] = useState(false);
   const [pathDraft, setPathDraft] = useState('');
   const datalistId = useId();
+  const dirInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const el = dirInputRef.current;
+    if (!el) return;
+    el.webkitdirectory = true;
+    el.setAttribute('webkitdirectory', '');
+    el.setAttribute('directory', '');
+  });
 
   useEffect(() => {
     if (workspace) {
@@ -61,7 +90,36 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
     }
   }, [workspace?.path]);
 
-  if (!available) return null;
+  if (!available && !workspace) return null;
+
+  const triggerBrowserFolderPick = () => {
+    if (directPickerAvailable && canUseDirectDirectoryPicker() && onPickBrowser) {
+      onPickBrowser();
+      return;
+    }
+    const el = dirInputRef.current;
+    if (el) {
+      el.value = '';
+      el.click();
+    }
+  };
+
+  const hiddenDirInput = onPickBrowserFiles ? (
+    <input
+      ref={dirInputRef}
+      type="file"
+      multiple
+      tabIndex={-1}
+      aria-hidden="true"
+      className="sr-only"
+      onChange={(e) => {
+        if (e.target.files && e.target.files.length > 0) {
+          onPickBrowserFiles(e.target.files);
+        }
+        e.target.value = '';
+      }}
+    />
+  ) : null;
 
   const previewTotal = preview
     ? preview.gathered.use.items
@@ -70,18 +128,27 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
     : 0;
 
   if (!workspace) {
+    const browserOnly = !serverAvailable && browserAvailable;
     return (
       <div className="space-y-2">
+        {hiddenDirInput}
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          {!formOpen ? (
+          {!formOpen || browserOnly ? (
             <button
               type="button"
-              disabled={busy}
-              onClick={() => setFormOpen(true)}
+              disabled={busy || opening}
+              onClick={() => {
+                if (browserOnly) triggerBrowserFolderPick();
+                else setFormOpen(true);
+              }}
               className="inline-flex min-h-[30px] items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-[11px] font-medium text-slate-700 transition-colors hover:border-teal-500/40 hover:bg-teal-50/50 hover:text-teal-800 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:text-teal-300"
               title="Connect a local project folder on this computer for @-mentions, search, and project outlines"
             >
-              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" aria-hidden="true" />
+              {opening ? (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-teal-600 dark:text-teal-400" aria-hidden="true" />
+              ) : (
+                <FolderOpen className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" aria-hidden="true" />
+              )}
               Open project folder
             </button>
           ) : (
@@ -116,6 +183,17 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
                 {opening && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
                 Open
               </button>
+              {browserAvailable && (
+                <button
+                  type="button"
+                  disabled={opening}
+                  onClick={triggerBrowserFolderPick}
+                  className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                  title="Pick a folder using your browser folder dialog"
+                >
+                  Browse…
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setFormOpen(false)}
@@ -135,14 +213,17 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
     );
   }
 
-  const displayName = info?.name || workspace.path.split(/[\\/]/).filter(Boolean).pop() || workspace.path;
+  const isBrowser = isBrowserWorkspacePath(workspace.path);
+  const isSnapshot = isBrowserSnapshotPath(workspace.path);
+  const displayName = info?.name || workspace.name || parseBrowserWorkspaceName(workspace.path);
 
   return (
     <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50/90 px-3 py-2 text-[11px] dark:border-slate-800 dark:bg-slate-950/70">
+      {hiddenDirInput}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <span
           className="inline-flex min-w-0 items-center gap-1.5 font-medium text-slate-800 dark:text-slate-200"
-          title={workspace.path}
+          title={isBrowser ? `${displayName} (browser folder access)` : workspace.path}
         >
           <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" aria-hidden="true" />
           <span className="truncate font-mono">{displayName}</span>
@@ -157,6 +238,7 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
           <span className="tabular-nums text-slate-500 dark:text-slate-400">
             {info.fileCount} files{info.truncated ? ' (capped)' : ''}
             {info.isGit ? ' · Git' : ''}
+            {info.source === 'browser' ? ' · Browser folder' : info.watching ? ' · Live' : ''}
             {info.embeddings.state === 'running'
               ? ` · embeddings ${info.embeddings.embedded}/${info.embeddings.total}`
               : info.embeddings.state === 'idle' && info.embeddings.model
@@ -217,9 +299,21 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
       </div>
 
       {(error || openError || info?.embeddings.state === 'error') && (
-        <p role="alert" className="text-[11px] text-rose-600 dark:text-rose-400">
-          {error || openError || info?.embeddings.error}
-        </p>
+        <div role="alert" className="flex flex-wrap items-center gap-2 text-[11px] text-rose-600 dark:text-rose-400">
+          <span>{error || openError || info?.embeddings.error}</span>
+          {needsPermission && (
+            <button
+              type="button"
+              onClick={() => {
+                if (!isSnapshot && directPickerAvailable && onReconnectBrowser) onReconnectBrowser();
+                else triggerBrowserFolderPick();
+              }}
+              className="rounded-md bg-teal-600 px-2 py-0.5 font-medium text-white hover:bg-teal-500"
+            >
+              {isSnapshot || !directPickerAvailable ? 'Choose folder' : 'Grant access'}
+            </button>
+          )}
+        </div>
       )}
 
       {preview && (

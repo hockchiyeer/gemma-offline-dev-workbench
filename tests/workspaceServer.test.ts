@@ -170,8 +170,71 @@ test('WorkspaceManager indexes files safely, searches with BM25 + optional embed
         }),
       WorkspaceError
     );
+    await mgr.closeAll();
   } finally {
     await new Promise<void>((r) => embedServer.close(() => r()));
+  }
+});
+
+test('chokidar watcher incrementally indexes new, updated, and deleted files while skipping denied/ignored paths', async () => {
+  const root = await makeProject();
+  const mgr = createWorkspaceManager({ watch: true, watchDebounceMs: 40 });
+  try {
+    const opened = await mgr.open(root);
+    assert.equal(opened.watching, true);
+    assert.equal(opened.source, 'server');
+    assert.equal(opened.fileCount, 9);
+
+    // Wait briefly for chokidar to finish attaching OS watchers before writing.
+    await new Promise((r) => setTimeout(r, 120));
+
+    // Add a new TypeScript file and a denied .env file on disk.
+    const addedPath = path.join(root, 'src/loyalty.ts');
+    fs.writeFileSync(addedPath, 'export function awardLoyaltyPoints(n: number) { return n * 2; }\n');
+    fs.writeFileSync(path.join(root, '.env.local'), 'SECRET=should_never_be_indexed');
+
+    let found = false;
+    for (let i = 0; i < 40; i++) {
+      const syms = mgr.symbols(root, 'awardLoyaltyPoints', 5);
+      if (syms.some((s) => s.name === 'awardLoyaltyPoints' && s.path === 'src/loyalty.ts')) {
+        found = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(found, true, 'chokidar watcher should pick up newly added source files incrementally');
+    assert.equal(mgr.info(root).fileCount, 10, 'denied .env.local must not enter file index');
+
+    const hitRes = await mgr.search(root, 'awardLoyaltyPoints', 'lexical', 4);
+    assert.equal(hitRes.hits[0].path, 'src/loyalty.ts');
+
+    // Modify the file and verify updated symbol appears.
+    fs.writeFileSync(addedPath, 'export function redeemLoyaltyVoucher(id: string) { return id; }\n');
+    let updated = false;
+    for (let i = 0; i < 40; i++) {
+      const syms = mgr.symbols(root, 'redeemLoyaltyVoucher', 5);
+      if (syms.length > 0 && mgr.symbols(root, 'awardLoyaltyPoints', 5).length === 0) {
+        updated = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(updated, true, 'chokidar watcher should replace symbols and chunks on file modification');
+
+    // Delete the file and verify it is removed from index and search.
+    fs.unlinkSync(addedPath);
+    let removed = false;
+    for (let i = 0; i < 40; i++) {
+      if (mgr.files(root, 'loyalty', 5).files.length === 0 && mgr.symbols(root, 'redeemLoyaltyVoucher', 5).length === 0) {
+        removed = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(removed, true, 'chokidar watcher should remove deleted files from the index');
+    assert.equal(mgr.info(root).fileCount, 9);
+  } finally {
+    await mgr.closeAll();
   }
 });
 

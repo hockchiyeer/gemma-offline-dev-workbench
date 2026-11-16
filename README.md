@@ -10,7 +10,8 @@ Offline-first, self-sustaining coding workbench powered by locally installed **G
 - **Live Local-LLM Status Bar**: A bar under the header on every tab says whether the local LLM is up, starting, installing, or down, with the model name and Ollama version, so a loaded web page is never mistaken for a working AI. On phone screens, details collapse behind a tap toggle to preserve editor height. See [Is the local LLM up?](#is-the-local-llm-up).
 - **Versioned Snippet Lineage & AI Actions**: One-tap **Explain**, **Debug**, **Refactor**, **Expand** and **Unit Tests** on any snippet. Code the model returns is saved beneath the source snippet as traceable child versions (`v2`, `v3`, …) with the action, model, time and prompt recorded. See [Snippet lineage & AI actions](#snippet-lineage--ai-actions).
 - **Reasoning You Can See and Control**: Gemma 4 "thinks" before it answers. The chat shows live progress (loading, reasoning, generating, with elapsed seconds) and a collapsible **Show reasoning** trace that is saved with each reply. **Runtime settings → Reasoning (Ollama)** can switch thinking off for much faster answers on CPU-only PCs. See [Slow or stuck answers](#slow-or-stuck-answers).
-- **Responsive Desktop & Mobile PWA**: Installable standalone Progressive Web App with bundled offline fonts (`Plus Jakarta Sans`, `DM Sans`, `JetBrains Mono`), dual light/dark themes, and phone-friendly editor headers with collapsible `Tools & AI` drawers so the code and Markdown editors stay usable on small screens.
+- **Project Folder Context (`@`-Mentions & Live Index)**: Attach a local repo directly to any coding chat via the Node server (with real-time incremental file watching and Git status/diff) or directly in the browser via the File System Access API / folder snapshot fallback in standalone PWAs and embedded previews. See [Working with a local project folder](#working-with-a-local-project-folder).
+- **Responsive Desktop & Mobile PWA**: Installable standalone Progressive Web App with bundled offline fonts (`Plus Jakarta Sans`, `DM Sans`, `JetBrains Mono`), dual light/dark themes, multi-category coding starter templates with automatic session naming, and phone-friendly editor headers with collapsible `Tools & AI` drawers so the code and Markdown editors stay usable on small screens.
 
 ## Quick start
 
@@ -160,22 +161,26 @@ instructions travel with the message rather than the system prompt, so the runti
 
 ## Working with a local project folder
 
-When GemmaVault runs on your machine (`127.0.0.1`), you can attach a project folder to any coding chat:
+Attach a repository or project folder to any coding chat in either of two modes:
 
-1. Click **Open project folder** above the composer and enter the folder path (remembered per chat session).
-2. Type `@` in the composer to attach **files** (`src/payments.ts`), **folders**, **symbols**, **git status / diff**,
-   or vault snippets and docs.
-3. Optional controls on the workspace bar:
+- **Local Node server (`127.0.0.1`)**: Click **Open project folder** above the composer and enter the path (or use **Browse…** where supported). Open folders show **Live** in the bar and watch disk changes incrementally via `chokidar`, keeping files, symbols, BM25, and cached embeddings up to date automatically. Supports `@git:status` and `@git:diff`.
+- **Standalone PWA / browser fallback**: When server folder access is unavailable, clicking **Open project folder** opens the browser's folder picker directly (`showDirectoryPicker` in top-level Chromium windows, or directory upload selection inside cross-origin iframes and other browsers). Indexing, `@`-mentions, secret redaction, repo maps, and optional loopback Ollama embeddings run in browser memory; `@git:status` and `@git:diff` require the local server.
+
+Inside any connected folder:
+
+1. Type `@` in the composer to attach **files** (`src/payments.ts`), **folders**, **symbols**, **git status / diff** (server mode), or vault snippets and docs.
+2. Optional controls on the workspace bar:
    - **Auto-search**: finds related code chunks with local BM25 keyword search, and optionally meaning-based search if
      you set an Ollama **Embedding model** (e.g. `embeddinggemma`) in **Model Setup**.
    - **Outline**: sends a compact project map of key files and top symbols.
    - **Preview**: inspects what will be attached (with token counts) and lets you untick any auto-retrieved chunk.
-4. Every message records a collapsible **Project context added** disclosure listing what was included, and follows the
+3. Every message records a collapsible **Project context added** disclosure listing what was included, and follows the
    same prompt-cache-friendly layout (system prompt untouched).
 
-Safety: folder access is disabled when exposed over LAN (`HOST=0.0.0.0`), rejects path traversal and symlinks leaving
-the folder, honours `.gitignore` and `.gemmaignore`, excludes `.env*`, private keys, `.git/`, and build directories, and
-redacts common secret patterns before indexing or sending to the model.
+Safety: server folder access is disabled when exposed over LAN (`HOST=0.0.0.0`) and rejects path traversal and
+symlinks leaving the folder. Both modes honour `.gitignore` and `.gemmaignore`, exclude `.env*`, private keys, `.git/`,
+binary/oversized files, and build directories, redact common secret patterns before indexing or sending to the model,
+and keep the search index strictly in memory rather than writing file contents to disk.
 
 ## Slow or stuck answers
 
