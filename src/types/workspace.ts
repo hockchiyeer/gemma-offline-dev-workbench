@@ -105,3 +105,9 @@ export interface RepoMapResult {
   files: number;
   symbols: number;
 }
+
+export interface BrowseWorkspaceResult {
+  supported: boolean;
+  cancelled: boolean;
+  path: string | null;
+}

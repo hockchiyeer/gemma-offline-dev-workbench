@@ -1,4 +1,5 @@
 import type {
+  BrowseWorkspaceResult,
   EmbeddingSetting,
   FileListResult,
   FileRead,
@@ -35,6 +36,63 @@ export async function probeWorkspaceAvailable(signal?: AbortSignal): Promise<boo
     return json.available === true;
   } catch {
     return false;
+  }
+}
+
+export async function browseServerWorkspace(
+  initialDir?: string,
+  signal?: AbortSignal
+): Promise<BrowseWorkspaceResult> {
+  const res = await fetch('/api/workspace/browse', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-GemmaVault-Workspace': '1',
+    },
+    body: JSON.stringify(initialDir ? { initialDir } : {}),
+    signal,
+  });
+  const text = await res.text();
+  let parsed: unknown = null;
+  if (text) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+  }
+  if (!res.ok) {
+    const msg =
+      parsed && typeof parsed === 'object' && typeof (parsed as { error?: unknown }).error === 'string'
+        ? (parsed as { error: string }).error
+        : `Folder picker failed (HTTP ${res.status})`;
+    throw new Error(msg);
+  }
+  return parsed as BrowseWorkspaceResult;
+}
+
+const LAST_WORKSPACE_PATH_KEY = 'gemmavault_last_workspace_path';
+
+export function loadLastWorkspacePath(): string {
+  try {
+    if (typeof localStorage === 'undefined') return '';
+    return localStorage.getItem(LAST_WORKSPACE_PATH_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function saveLastWorkspacePath(rawPath: string): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const trimmed = rawPath.trim();
+    if (trimmed) {
+      localStorage.setItem(LAST_WORKSPACE_PATH_KEY, trimmed);
+    } else {
+      localStorage.removeItem(LAST_WORKSPACE_PATH_KEY);
+    }
+  } catch {
+    // Ignore disabled storage or quota errors.
   }
 }
 

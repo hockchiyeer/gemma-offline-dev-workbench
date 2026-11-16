@@ -43,7 +43,7 @@ import {
   registerBrowserFileSnapshot,
 } from '../lib/browserWorkspace';
 import { embeddingSettingFor, useWorkspace } from '../lib/useWorkspace';
-import { WorkspaceConnection } from '../lib/workspaceClient';
+import { browseServerWorkspace, saveLastWorkspacePath, WorkspaceConnection } from '../lib/workspaceClient';
 import {
   assembleContextBlocks,
   buildMentionCandidates,
@@ -61,7 +61,7 @@ import {
   type CodingStarterCategory,
 } from '../lib/codingStarters';
 import { deriveSessionTitle, isDefaultSessionTitle } from '../lib/sessionNaming';
-import type { FileListItem, SymbolHit } from '../types/workspace';
+import type { BrowseWorkspaceResult, FileListItem, SymbolHit } from '../types/workspace';
 import {
   extractSnippetSnapshotFromSentContext,
   inferActionKindFromPrompt,
@@ -502,6 +502,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     setOpenError(null);
     try {
       const info = await new WorkspaceConnection(rawPath, embedding).open();
+      saveLastWorkspacePath(info.rootPath);
       persistWorkspace({ path: info.rootPath, repoMap: true, autoRetrieve: true });
       setWorkspacePreview(null);
       setExcludedKeys(new Set());
@@ -509,6 +510,16 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
       setOpenError(e instanceof Error ? e.message : 'Could not open that folder.');
     } finally {
       setOpening(false);
+    }
+  };
+
+  const handleBrowseServerFolder = async (initialDir?: string): Promise<BrowseWorkspaceResult> => {
+    setOpenError(null);
+    try {
+      return await browseServerWorkspace(initialDir);
+    } catch (e) {
+      setOpenError(e instanceof Error ? e.message : 'Could not open the folder browser.');
+      return { supported: true, cancelled: true, path: null };
     }
   };
 
@@ -1907,6 +1918,7 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
             excluded={excludedKeys}
             busy={streaming || compacting || gathering}
             onOpen={(p) => void handleOpenWorkspace(p)}
+            onBrowseServer={(initialDir) => handleBrowseServerFolder(initialDir)}
             onPickBrowser={() => void handlePickBrowserFolder()}
             onPickBrowserFiles={(files) => void handlePickBrowserFiles(files)}
             onReconnectBrowser={() => void wsState.reconnectBrowser()}

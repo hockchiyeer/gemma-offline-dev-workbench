@@ -6,9 +6,10 @@ import {
   isBrowserWorkspacePath,
   parseBrowserWorkspaceName,
 } from '../lib/browserWorkspace';
+import { loadLastWorkspacePath, saveLastWorkspacePath } from '../lib/workspaceClient';
 import type { GatheredContext } from '../lib/workspaceContext';
 import type { ChatWorkspace } from '../types/vault';
-import type { WorkspaceInfo } from '../types/workspace';
+import type { BrowseWorkspaceResult, WorkspaceInfo } from '../types/workspace';
 
 export interface WorkspacePreview {
   query: string;
@@ -34,6 +35,7 @@ interface WorkspaceBarProps {
   excluded: Set<string>;
   busy: boolean;
   onOpen: (path: string) => void;
+  onBrowseServer?: (initialDir?: string) => Promise<BrowseWorkspaceResult>;
   onPickBrowser?: () => void;
   onPickBrowserFiles?: (files: FileList) => void;
   onReconnectBrowser?: () => void;
@@ -62,6 +64,7 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   excluded,
   busy,
   onOpen,
+  onBrowseServer,
   onPickBrowser,
   onPickBrowserFiles,
   onReconnectBrowser,
@@ -71,9 +74,16 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   onToggleExcluded,
 }) => {
   const [formOpen, setFormOpen] = useState(false);
-  const [pathDraft, setPathDraft] = useState('');
+  const [pathDraft, setPathDraft] = useState(() => loadLastWorkspacePath());
+  const [browsing, setBrowsing] = useState(false);
+  const [serverBrowseSupported, setServerBrowseSupported] = useState(true);
   const datalistId = useId();
   const dirInputRef = useRef<HTMLInputElement | null>(null);
+  const userEditedPathRef = useRef(false);
+
+  useEffect(() => {
+    setServerBrowseSupported(true);
+  }, [serverAvailable]);
 
   useEffect(() => {
     const el = dirInputRef.current;
@@ -86,9 +96,19 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
   useEffect(() => {
     if (workspace) {
       setFormOpen(false);
-      setPathDraft('');
+      if (!isBrowserWorkspacePath(workspace.path)) {
+        userEditedPathRef.current = false;
+        setPathDraft(workspace.path);
+        saveLastWorkspacePath(workspace.path);
+      }
     }
   }, [workspace?.path]);
+
+  useEffect(() => {
+    if (!workspace && !userEditedPathRef.current && !pathDraft && knownPaths[0]) {
+      setPathDraft(knownPaths[0]);
+    }
+  }, [workspace, knownPaths, pathDraft]);
 
   if (!available && !workspace) return null;
 
@@ -102,6 +122,34 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
       el.value = '';
       el.click();
     }
+  };
+
+  const handleBrowseClick = async () => {
+    if (browsing || opening) return;
+    if (serverAvailable && onBrowseServer && serverBrowseSupported) {
+      setBrowsing(true);
+      try {
+        const initial = pathDraft.trim() || knownPaths[0] || undefined;
+        const res = await onBrowseServer(initial);
+        if (res.supported) {
+          if (!res.cancelled && res.path) {
+            userEditedPathRef.current = false;
+            setPathDraft(res.path);
+            saveLastWorkspacePath(res.path);
+            onOpen(res.path);
+          }
+          return;
+        }
+        setServerBrowseSupported(false);
+      } finally {
+        setBrowsing(false);
+      }
+      if (browserAvailable) {
+        triggerBrowserFolderPick();
+      }
+      return;
+    }
+    triggerBrowserFolderPick();
   };
 
   const hiddenDirInput = onPickBrowserFiles ? (
@@ -156,7 +204,10 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
               onSubmit={(e) => {
                 e.preventDefault();
                 const trimmed = pathDraft.trim();
-                if (trimmed && !opening) onOpen(trimmed);
+                if (trimmed && !opening) {
+                  saveLastWorkspacePath(trimmed);
+                  onOpen(trimmed);
+                }
               }}
               className="flex w-full flex-wrap items-center gap-2"
             >
@@ -164,7 +215,12 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
                 type="text"
                 list={datalistId}
                 value={pathDraft}
-                onChange={(e) => setPathDraft(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  userEditedPathRef.current = true;
+                  setPathDraft(next);
+                  saveLastWorkspacePath(next);
+                }}
                 placeholder="/path/to/project or C:\code\project"
                 aria-label="Project folder path"
                 autoFocus
@@ -177,27 +233,33 @@ export const WorkspaceBar: React.FC<WorkspaceBarProps> = ({
               </datalist>
               <button
                 type="submit"
-                disabled={opening || !pathDraft.trim()}
+                disabled={opening || browsing || !pathDraft.trim()}
                 className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg bg-teal-600 px-3 text-xs font-medium text-white hover:bg-teal-500 disabled:opacity-50"
               >
                 {opening && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
                 Open
               </button>
-              {browserAvailable && (
+              {((serverAvailable && Boolean(onBrowseServer) && serverBrowseSupported) || browserAvailable) && (
                 <button
                   type="button"
-                  disabled={opening}
-                  onClick={triggerBrowserFolderPick}
+                  disabled={opening || browsing}
+                  onClick={() => void handleBrowseClick()}
                   className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-                  title="Pick a folder using your browser folder dialog"
+                  title={
+                    serverAvailable && serverBrowseSupported
+                      ? 'Browse for a project folder on this computer'
+                      : 'Pick a folder using your browser folder dialog'
+                  }
                 >
+                  {browsing && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
                   Browse…
                 </button>
               )}
               <button
                 type="button"
+                disabled={browsing}
                 onClick={() => setFormOpen(false)}
-                className="min-h-[36px] rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                className="min-h-[36px] rounded-lg border border-slate-300 px-2.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
               >
                 Cancel
               </button>

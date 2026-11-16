@@ -13,13 +13,15 @@ function parseEmbedding(v: unknown): EmbeddingSetting | null {
   return { baseUrl, model: model.trim().slice(0, 120) };
 }
 
-export const WORKSPACE_OPS = ['open', 'close', 'info', 'files', 'tree', 'read', 'symbols', 'search', 'map', 'git'] as const;
+export const WORKSPACE_OPS = ['browse', 'open', 'close', 'info', 'files', 'tree', 'read', 'symbols', 'search', 'map', 'git'] as const;
 export type WorkspaceOp = (typeof WORKSPACE_OPS)[number];
 
 /** Transport-independent request handler. server.ts wires it to Express; tests call it directly. */
 export async function handleWorkspaceOp(manager: WorkspaceManager, op: string, body: Record<string, unknown>): Promise<unknown> {
   const root = str(body.root);
   switch (op as WorkspaceOp) {
+    case 'browse':
+      return manager.browse(str(body.initialDir) || undefined);
     case 'open':
       return manager.open(root, parseEmbedding(body.embedding));
     case 'close':

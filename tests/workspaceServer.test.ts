@@ -6,6 +6,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { createApp } from '../server.ts';
 import { handleWorkspaceOp } from '../server/workspace/api.ts';
+import { normalizePickedPath, resolveInitialBrowseDir } from '../server/workspace/browse.ts';
 import { IgnoreMatcher } from '../server/workspace/ignore.ts';
 import { redactSecrets, resolveInside, resolveRoot, WorkspaceError } from '../server/workspace/safety.ts';
 import { extractImports, extractSymbols } from '../server/workspace/symbols.ts';
@@ -269,5 +270,74 @@ test('Express /api/workspace routes enforce CSRF header and allowWorkspace flag'
     assert.equal(noHeader.status, 400);
   } finally {
     await new Promise<void>((r) => allowed.close(() => r()));
+  }
+});
+
+test('POST /api/workspace/browse enforces guards, resolves picked paths, and handles cancel/unsupported cleanly', async () => {
+  const root = await makeProject();
+  let seenInitial: string | undefined;
+  let nextResult: { supported: boolean; cancelled: boolean; path: string | null } = {
+    supported: true,
+    cancelled: false,
+    path: root,
+  };
+
+  const mgr = createWorkspaceManager({
+    watch: false,
+    pickFolder: async (initialDir) => {
+      seenInitial = initialDir;
+      return nextResult;
+    },
+  });
+
+  // Helper validations
+  assert.equal(normalizePickedPath('\uFEFF/Users/dev/my-app/\n', 'darwin'), '/Users/dev/my-app');
+  assert.equal(normalizePickedPath('C:\\code\\app\r\n', 'win32'), 'C:\\code\\app');
+  assert.equal(normalizePickedPath('   \n', 'win32'), null);
+  assert.equal(resolveInitialBrowseDir('/does/not/exist/anywhere'), undefined);
+  assert.equal(resolveInitialBrowseDir(root), fs.realpathSync(root));
+
+  const server = http.createServer(createApp({ allowWorkspace: true, workspaceManager: mgr }));
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as { port: number }).port;
+  try {
+    // Missing CSRF header rejected
+    const unauth = await fetch(`http://127.0.0.1:${port}/api/workspace/browse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(unauth.status, 400);
+
+    // Selected directory returned with canonical path
+    const okRes = await fetch(`http://127.0.0.1:${port}/api/workspace/browse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GemmaVault-Workspace': '1' },
+      body: JSON.stringify({ initialDir: root }),
+    });
+    assert.equal(okRes.status, 200);
+    const okJson = (await okRes.json()) as { supported: boolean; cancelled: boolean; path: string | null };
+    assert.deepEqual(okJson, { supported: true, cancelled: false, path: fs.realpathSync(root) });
+    assert.equal(seenInitial, root);
+
+    // Cancel and unsupported responses pass through cleanly
+    nextResult = { supported: true, cancelled: true, path: null };
+    const cancelRes = await fetch(`http://127.0.0.1:${port}/api/workspace/browse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GemmaVault-Workspace': '1' },
+      body: JSON.stringify({}),
+    });
+    assert.deepEqual(await cancelRes.json(), { supported: true, cancelled: true, path: null });
+
+    nextResult = { supported: false, cancelled: false, path: null };
+    const unsupRes = await fetch(`http://127.0.0.1:${port}/api/workspace/browse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GemmaVault-Workspace': '1' },
+      body: JSON.stringify({}),
+    });
+    assert.deepEqual(await unsupRes.json(), { supported: false, cancelled: false, path: null });
+  } finally {
+    await mgr.closeAll();
+    await new Promise<void>((r) => server.close(() => r()));
   }
 });

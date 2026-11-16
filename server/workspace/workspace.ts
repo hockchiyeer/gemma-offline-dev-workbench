@@ -3,12 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { watch as watchFiles, type FSWatcher } from 'chokidar';
 import type {
-  EmbeddingSetting, FileListResult, FileRead, GitOp, GitResult, RepoMapResult, SearchHit, SearchMode,
-  SearchResult, SymbolHit, TreeEntry, WorkspaceInfo,
+  BrowseWorkspaceResult, EmbeddingSetting, FileListResult, FileRead, GitOp, GitResult, RepoMapResult,
+  SearchHit, SearchMode, SearchResult, SymbolHit, TreeEntry, WorkspaceInfo,
 } from '../../src/types/workspace.ts';
 import {
   dotProduct, embedTexts, isLoopbackHttpUrl, scorePath, vecKey,
 } from '../../src/lib/workspaceCore.ts';
+import { pickNativeFolder } from './browse.ts';
 import {
   LIMITS, applyIncrementalChanges, bm25Search, buildBm25, fuseRanks, renderRepoMap, scanWorkspace,
   type Bm25Index, type Chunk, type ScanResult,
@@ -43,6 +44,8 @@ export interface WorkspaceManagerOptions {
   watch?: boolean;
   /** Debounce delay in ms before flushing file watcher events (defaults to 120). */
   watchDebounceMs?: number;
+  /** Native OS folder picker override (used by tests). */
+  pickFolder?: (initialDir?: string) => Promise<BrowseWorkspaceResult>;
 }
 
 export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
@@ -50,6 +53,7 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
   const gitTimeout = options.gitTimeoutMs ?? 8000;
   const watchEnabled = options.watch !== false;
   const watchDebounceMs = Math.max(20, options.watchDebounceMs ?? 120);
+  const doPickFolder = options.pickFolder ?? pickNativeFolder;
   const states = new Map<string, WorkspaceState>();
 
   const stopWatcher = (st: WorkspaceState) => {
@@ -224,6 +228,16 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
   }
 
   return {
+    async browse(initialDir?: string): Promise<BrowseWorkspaceResult> {
+      const res = await doPickFolder(initialDir);
+      if (!res.supported || res.cancelled || !res.path) return res;
+      try {
+        return { supported: true, cancelled: false, path: resolveRoot(res.path) };
+      } catch {
+        return { supported: true, cancelled: false, path: res.path };
+      }
+    },
+
     async open(rawPath: string, embedding?: EmbeddingSetting | null): Promise<WorkspaceInfo> {
       const root = resolveRoot(rawPath);
       const prev = states.get(root);
