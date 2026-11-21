@@ -83,12 +83,49 @@ export interface BuildCandidatesOptions {
   docs: DocPage[];
 }
 
+export type MentionScope = 'all' | 'file' | 'folder' | 'symbol' | 'git' | 'snippet' | 'doc';
+
+const SCOPE_PREFIXES: Record<string, MentionScope> = {
+  file: 'file',
+  path: 'file',
+  folder: 'folder',
+  dir: 'folder',
+  symbol: 'symbol',
+  sym: 'symbol',
+  fn: 'symbol',
+  git: 'git',
+  snippet: 'snippet',
+  doc: 'doc',
+};
+
+/**
+ * Splits an "@query" into an optional scope and the search term: `symbol:buildGemmaMessages` ->
+ * { scope: 'symbol', term: 'buildGemmaMessages' }. Anything without a known prefix searches everything.
+ */
+export function parseMentionQuery(raw: string): { scope: MentionScope; term: string } {
+  const m = raw.match(/^([a-z]+):(.*)$/i);
+  const scope = m ? SCOPE_PREFIXES[m[1].toLowerCase()] : undefined;
+  return scope && m ? { scope, term: m[2].trim() } : { scope: 'all', term: raw.trim() };
+}
+
+/** Which workspace lookups an "@query" needs, so a scoped query does not ask the server for the rest. */
+export function mentionFetchPlan(raw: string): { files: boolean; symbols: boolean; term: string } {
+  const { scope, term } = parseMentionQuery(raw);
+  return {
+    files: scope === 'all' || scope === 'file' || scope === 'folder',
+    symbols: scope === 'all' || scope === 'symbol',
+    term,
+  };
+}
+
 export function buildMentionCandidates(query: string, opts: BuildCandidatesOptions): MentionCandidate[] {
-  const q = query.trim().toLowerCase();
+  const { scope, term } = parseMentionQuery(query);
+  const q = term.toLowerCase();
+  const want = (s: MentionScope) => scope === 'all' || scope === s;
   const out: MentionCandidate[] = [];
 
   if (opts.workspace) {
-    for (const f of opts.files ?? []) {
+    for (const f of want('file') ? opts.files ?? [] : []) {
       out.push({
         key: `file:${f.path}`,
         ref: { kind: 'file', id: f.path, title: f.path },
@@ -98,7 +135,7 @@ export function buildMentionCandidates(query: string, opts: BuildCandidatesOptio
       });
     }
 
-    for (const d of opts.dirs ?? []) {
+    for (const d of want('folder') ? opts.dirs ?? [] : []) {
       const label = d.endsWith('/') ? d : `${d}/`;
       out.push({
         key: `folder:${d}`,
@@ -109,7 +146,7 @@ export function buildMentionCandidates(query: string, opts: BuildCandidatesOptio
       });
     }
 
-    for (const s of opts.symbols ?? []) {
+    for (const s of want('symbol') ? opts.symbols ?? [] : []) {
       const startLine = Math.max(1, s.line - 2);
       const endLine = s.line + 45;
       out.push({
@@ -127,7 +164,7 @@ export function buildMentionCandidates(query: string, opts: BuildCandidatesOptio
       });
     }
 
-    if (opts.gitAvailable !== false) {
+    if (want('git') && opts.gitAvailable !== false) {
       const gitOptions: Array<{ id: 'diff' | 'status'; title: string; detail: string; keywords: string }> = [
         { id: 'diff', title: 'git:diff', detail: 'Uncommitted Git changes', keywords: 'git diff changes' },
         { id: 'status', title: 'git:status', detail: 'Git branch and file status', keywords: 'git status branch' },
@@ -146,7 +183,7 @@ export function buildMentionCandidates(query: string, opts: BuildCandidatesOptio
     }
   }
 
-  for (const s of opts.snippets) {
+  for (const s of want('snippet') ? opts.snippets : []) {
     const hay = `${s.title} ${s.language} ${s.tags.join(' ')}`.toLowerCase();
     if (!q || hay.includes(q)) {
       out.push({
@@ -159,7 +196,7 @@ export function buildMentionCandidates(query: string, opts: BuildCandidatesOptio
     }
   }
 
-  for (const d of opts.docs) {
+  for (const d of want('doc') ? opts.docs : []) {
     const hay = `${d.title} ${d.category}`.toLowerCase();
     if (!q || hay.includes(q)) {
       out.push({
@@ -173,6 +210,18 @@ export function buildMentionCandidates(query: string, opts: BuildCandidatesOptio
   }
 
   return out.slice(0, 12);
+}
+
+/**
+ * Wraps project content in a code fence that the content cannot close early: the fence is one backtick
+ * longer than the longest run of backticks inside it. (A Markdown file with its own ``` blocks would
+ * otherwise end the fence mid-file and leave the rest looking like ordinary prompt text.)
+ */
+export function fenced(content: string, language = 'text'): string {
+  let longest = 0;
+  for (const m of content.matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `${fence}${language}\n${content}\n${fence}`;
 }
 
 const WORKSPACE_SAFETY_NOTE =
@@ -253,7 +302,7 @@ export async function gatherWorkspaceContext(opts: GatherWorkspaceOptions): Prom
           ref.startLine !== undefined
             ? `${read.path}:${read.startLine}-${read.endLine}`
             : read.path;
-        const content = `\`\`\`${read.language}\n${read.content}\n\`\`\``;
+        const content = fenced(read.content, read.language);
         mentioned.push({ kind: 'file', title: label, content });
         items.push({ via: 'mention', label, tokens: estimateTokens(content) });
         if (read.redactions > 0) {
@@ -265,7 +314,7 @@ export async function gatherWorkspaceContext(opts: GatherWorkspaceOptions): Prom
           .map((e) => (e.type === 'dir' ? `${e.path}/` : e.path))
           .join('\n') || '(empty folder)';
         const label = ref.id ? `${ref.id}/` : '/';
-        const content = `\`\`\`text\n${listing}\n\`\`\``;
+        const content = fenced(listing, 'text');
         mentioned.push({ kind: 'folder', title: label, content });
         items.push({ via: 'mention', label, tokens: estimateTokens(content) });
       } else if (ref.kind === 'git') {
@@ -273,7 +322,7 @@ export async function gatherWorkspaceContext(opts: GatherWorkspaceOptions): Prom
         const res = await conn.git(gitOp, signal);
         const body = res.text.trim() || `(no git ${res.op} output)`;
         const label = `git:${res.op}`;
-        const content = `\`\`\`${res.op === 'diff' ? 'diff' : 'text'}\n${body}\n\`\`\``;
+        const content = fenced(body, res.op === 'diff' ? 'diff' : 'text');
         mentioned.push({ kind: 'git', title: label, content });
         items.push({ via: 'mention', label, tokens: estimateTokens(content) });
         if (res.truncated) truncated = true;
@@ -301,7 +350,7 @@ export async function gatherWorkspaceContext(opts: GatherWorkspaceOptions): Prom
         const label = `${hit.path}:${hit.startLine}-${hit.endLine}`;
         if (excludeKeys?.has(label)) continue;
         const lang = langFromPath(hit.path);
-        const content = `\`\`\`${lang}\n${hit.text}\n\`\`\``;
+        const content = fenced(hit.text, lang);
         retrieved.push({ kind: 'retrieved', title: label, content });
         items.push({ via: 'retrieved', label, tokens: estimateTokens(content) });
         kept++;
@@ -323,7 +372,7 @@ export async function gatherWorkspaceContext(opts: GatherWorkspaceOptions): Prom
       const mapRes = await conn.repoMap(mapTokens, [...coveredPaths], signal);
       if (mapRes.text.trim()) {
         const label = `${workspaceName} outline (${mapRes.files} files, ${mapRes.symbols} symbols)`;
-        const content = `\`\`\`text\n${mapRes.text}\n\`\`\``;
+        const content = fenced(mapRes.text, 'text');
         map = { kind: 'repo map', title: `${workspaceName} (${mapRes.files} files)`, content };
         items.push({ via: 'map', label, tokens: estimateTokens(content) });
       }

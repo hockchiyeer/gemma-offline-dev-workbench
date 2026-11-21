@@ -56,7 +56,35 @@ export function resolveInside(rootReal: string, rel: string): string {
 }
 
 /** Validates and canonicalises a folder the user wants to open. */
-export function resolveRoot(rawPath: string): string {
+const POSIX_SYSTEM_DIRS = [
+  '/etc', '/proc', '/sys', '/dev', '/boot', '/run', '/sbin', '/bin', '/lib', '/lib32', '/lib64',
+  '/usr/bin', '/usr/sbin', '/usr/lib', '/usr/lib64', '/usr/libexec', '/var/log', '/var/lib',
+  '/system', '/library', '/private/etc', '/private/var/db',
+];
+const WINDOWS_SYSTEM_RE = /^[a-z]:\/(windows|program files( \(x86\))?|programdata)(\/|$)/;
+const CREDENTIAL_DIRS = new Set(['.ssh', '.aws', '.gnupg', '.kube', '.azure']);
+
+/** True for operating-system folders, which are never a "project" (compared case-insensitively). */
+export function isSystemFolder(real: string): boolean {
+  const norm = real.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
+  return WINDOWS_SYSTEM_RE.test(`${norm}/`) || POSIX_SYSTEM_DIRS.some((d) => norm === d || norm.startsWith(`${d}/`));
+}
+
+function isInsideDir(root: string, candidate: string): boolean {
+  if (candidate === root) return true;
+  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  return candidate.startsWith(prefix);
+}
+
+/** Operator-configured roots (GEMMAVAULT_WORKSPACE_ROOTS, path-delimiter separated); empty means "any folder". */
+export function configuredRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.GEMMAVAULT_WORKSPACE_ROOTS ?? '')
+    .split(path.delimiter)
+    .map((r) => r.trim())
+    .filter(Boolean);
+}
+
+export function resolveRoot(rawPath: string, opts: { allowedRoots?: string[] } = {}): string {
   if (typeof rawPath !== 'string' || !rawPath.trim() || rawPath.includes('\0')) throw new WorkspaceError('Enter a folder path.');
   let p = rawPath.trim();
   if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) p = path.join(os.homedir(), p.slice(1));
@@ -70,5 +98,20 @@ export function resolveRoot(rawPath: string): string {
   if (!fs.statSync(real).isDirectory()) throw new WorkspaceError('That path is a file, not a folder.');
   if (path.parse(real).root === real) throw new WorkspaceError('Pick a project folder, not a drive or filesystem root.');
   if (real === os.homedir()) throw new WorkspaceError('Pick a project folder inside your home directory, not the home directory itself.');
+  if (isSystemFolder(real)) throw new WorkspaceError('That is an operating-system folder. Pick a project folder.', 403);
+  if (real.split(/[\\/]/).some((seg) => CREDENTIAL_DIRS.has(seg.toLowerCase()))) {
+    throw new WorkspaceError('That folder holds credentials (for example .ssh or .aws) and cannot be opened.', 403);
+  }
+  const allowed = opts.allowedRoots ?? configuredRoots();
+  if (allowed.length > 0) {
+    const ok = allowed.some((r) => {
+      try {
+        return isInsideDir(fs.realpathSync(path.resolve(r)), real);
+      } catch {
+        return false;
+      }
+    });
+    if (!ok) throw new WorkspaceError('That folder is outside the roots this server may open (GEMMAVAULT_WORKSPACE_ROOTS).', 403);
+  }
   return real;
 }

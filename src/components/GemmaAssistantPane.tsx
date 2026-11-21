@@ -55,6 +55,7 @@ import {
   describeUse,
   findMention,
   gatherWorkspaceContext,
+  mentionFetchPlan,
   removeMention,
   type GatheredContext,
   type MentionCandidate,
@@ -415,7 +416,8 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
   }, [mention]);
 
   useEffect(() => {
-    if (!mention || !mentionConn || !mention.query) {
+    const plan = mention ? mentionFetchPlan(mention.query) : null;
+    if (!mention || !mentionConn || !plan || !plan.term) {
       setMentionRemote(null);
       setMentionLoading(false);
       return;
@@ -425,7 +427,11 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
     let alive = true;
     setMentionLoading(true);
     const t = setTimeout(() => {
-      Promise.all([mentionConn.files(query, 6, ac.signal), mentionConn.symbols(query, 4, ac.signal)])
+      // "@symbol:foo" only asks for symbols matching "foo"; "@file:" / "@folder:" only for paths.
+      Promise.all([
+        plan.files ? mentionConn.files(plan.term, 6, ac.signal) : Promise.resolve({ files: [], dirs: [] as string[] }),
+        plan.symbols ? mentionConn.symbols(plan.term, 4, ac.signal) : Promise.resolve([]),
+      ])
         .then(([f, symbols]) => {
           if (alive) setMentionRemote({ query, files: f.files, dirs: f.dirs, symbols });
         })

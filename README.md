@@ -168,19 +168,17 @@ Attach a repository or project folder to any coding chat in either of two modes:
 
 Inside any connected folder:
 
-1. Type `@` in the composer to attach **files** (`src/payments.ts`), **folders**, **symbols**, **git status / diff** (server mode), or vault snippets and docs.
+1. Type `@` in the composer to attach **files** (`src/payments.ts`), **folders**, **symbols**, **git status / diff** (server mode), or vault snippets and docs. Add an optional prefix to narrow matches: `@symbol:buildGemmaMessages` (also `sym:` / `fn:`), `@file:db`, `@folder:src/lib` (also `dir:`), `@git:diff`, `@snippet:retry`, `@doc:notes`.
 2. Optional controls on the workspace bar:
-   - **Auto-search**: finds related code chunks with local BM25 keyword search, and optionally meaning-based search if
-     you set an Ollama **Embedding model** (e.g. `embeddinggemma`) in **Model Setup**.
+   - **Auto-search**: finds related code chunks with local BM25 keyword search (ranking symbol declarations above call sites and implementation above tests/docs unless you ask about tests or docs), and optionally meaning-based search if you set an Ollama **Embedding model** (e.g. `embeddinggemma`) in **Model Setup**.
    - **Outline**: sends a compact project map of key files and top symbols.
    - **Preview**: inspects what will be attached (with token counts) and lets you untick any auto-retrieved chunk.
 3. Every message records a collapsible **Project context added** disclosure listing what was included, and follows the
    same prompt-cache-friendly layout (system prompt untouched).
 
-Safety: server folder access is disabled when exposed over LAN (`HOST=0.0.0.0`) and rejects path traversal and
-symlinks leaving the folder. Both modes honour `.gitignore` and `.gemmaignore`, exclude `.env*`, private keys, `.git/`,
-binary/oversized files, and build directories, redact common secret patterns before indexing or sending to the model,
-and keep the search index strictly in memory rather than writing file contents to disk.
+Git works when the opened folder is a **subfolder** of a repository (scoped to that folder, ignoring dotfiles repos rooted at your home directory), and excludes denied files—both their diffs and their names—from status and diff output.
+
+Safety: server folder access is disabled when exposed over LAN (`HOST=0.0.0.0`) and rejects path traversal, symlinks leaving the folder, OS folders (`/etc`, `/proc`, `/usr/bin`, `C:\Windows`, …), credential folders (`.ssh`, `.aws`, `.gnupg`, `.kube`), your home directory, and drive roots. Set `GEMMAVAULT_WORKSPACE_ROOTS` (`:`-delimited on macOS/Linux, `;` on Windows) to restrict openable folders to specific roots. Both modes honour `.gitignore` and `.gemmaignore`, exclude secret/key files (`id_rsa*`, `*.pem`, `.env*`, `service-account*.json`, `*.tfstate`, `*.tfvars`, etc.), `.git/`, binary/oversized files, and build directories, redact common secret patterns, wrap project content in dynamic code fences that cannot be closed early by file contents, and keep the search index strictly in memory.
 
 ## Slow or stuck answers
 

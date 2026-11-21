@@ -10,6 +10,7 @@ import {
   dotProduct, embedTexts, isLoopbackHttpUrl, scorePath, vecKey,
 } from '../../src/lib/workspaceCore.ts';
 import { cancelNativeFolderBrowse, pickNativeFolder } from './browse.ts';
+import { filterDiffByDenied, findGitRoot, formatStatus, parseStatusZ, repoPrefix } from './git.ts';
 import {
   LIMITS, applyIncrementalChanges, bm25Search, buildBm25, fuseRanks, renderRepoMap, scanWorkspace,
   type Bm25Index, type Chunk, type ScanResult,
@@ -206,7 +207,7 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
     chunkCount: st.scan.chunks.length,
     totalBytes: st.scan.totalBytes,
     truncated: st.scan.truncated,
-    isGit: fs.existsSync(path.join(st.root, '.git')),
+    isGit: findGitRoot(st.root) !== null,
     indexedAt: st.scannedAt,
     watching: st.watcherActive,
     source: 'server',
@@ -433,9 +434,12 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
 
     async git(rawRoot: string, op: GitOp): Promise<GitResult> {
       const st = get(rawRoot);
-      if (!fs.existsSync(path.join(st.root, '.git'))) throw new WorkspaceError('This folder is not a Git repository.', 404);
       if (op !== 'status' && op !== 'diff') throw new WorkspaceError('Unsupported git operation.');
-      const base = ['-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '--no-pager', '-c', 'diff.external='];
+      // The opened folder may be a subfolder of the repository; git is scoped to it with a `.` pathspec.
+      const gitRoot = findGitRoot(st.root);
+      if (!gitRoot) throw new WorkspaceError('This folder is not a Git repository.', 404);
+      const prefix = repoPrefix(gitRoot, st.root);
+      const base = ['-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '-c', 'core.quotepath=off', '--no-pager', '-c', 'diff.external='];
       const exclude = ['.env*', '*.pem', '*.key', 'id_rsa*', '*.p12', '*.pfx', '.npmrc', '.netrc', '*.sqlite', '*.sqlite3', '*.db', '*.gvbackup', '*.lock', 'package-lock.json']
         .map((g) => `:(exclude,glob)**/${g}`);
       const run = (args: string[]) =>
@@ -444,13 +448,14 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
             cwd: st.root,
             timeout: gitTimeout,
             maxBuffer: 4_000_000,
-            env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
-          }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+            env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' },
+          }, (err, stdout, stderr) => (err ? reject(Object.assign(err, { stderr: String(stderr ?? '') })) : resolve(stdout)));
         });
       let text: string;
       try {
         if (op === 'status') {
-          text = await run(['status', '--short', '--branch', '--untracked-files=normal']);
+          const raw = await run(['status', '--porcelain=v1', '-z', '--branch', '--untracked-files=normal', '--', '.']);
+          text = formatStatus(parseStatusZ(raw), prefix).text;
         } else {
           const args = ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3'];
           try {
@@ -459,10 +464,15 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions = {}) {
             // no commits yet: show staged + unstaged separately
             text = (await run([...args, '--cached', '--', '.', ...exclude])) + (await run([...args, '--', '.', ...exclude]));
           }
+          // The pathspec list above only trims noise; the central denylist is what keeps secrets out.
+          text = filterDiffByDenied(text, prefix).diff;
         }
       } catch (e) {
         const code = (e as { code?: string }).code;
         if (code === 'ENOENT') throw new WorkspaceError('Git is not installed or not on PATH.', 501);
+        if (/dubious ownership|safe\.directory/i.test((e as { stderr?: string }).stderr ?? '')) {
+          throw new WorkspaceError('Git refused this repository because it is owned by another user.', 403);
+        }
         throw new WorkspaceError('Git could not read this repository.', 502);
       }
       const redacted = redactSecrets(text).text;

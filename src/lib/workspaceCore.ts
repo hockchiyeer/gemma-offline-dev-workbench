@@ -28,10 +28,16 @@ export const DENIED_DIRS = new Set([
 
 const DENIED_FILE_RES: RegExp[] = [
   /^\.env(\..*)?$/i,
-  /\.(pem|key|p12|pfx|jks|keystore|kdbx|gpg|asc|crt|cer|der)$/i,
-  /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i,
-  /^\.(npmrc|pypirc|netrc|git-credentials|htpasswd)$/i,
+  /\.(pem|key|p12|pfx|jks|keystore|kdbx|gpg|asc|crt|cer|der|ppk|ovpn)$/i,
+  /^id_(rsa|dsa|ecdsa|ed25519)/i, // id_rsa, id_rsa.pub, id_rsa_backup, id_ed25519-work ...
+  /^\.(npmrc|pypirc|netrc|git-credentials|htpasswd|pgpass|my\.cnf|dockercfg|s3cfg|boto)$/i,
   /^(credentials|secrets?)(\.[a-z]+)?$/i,
+  /^(credentials|secrets?)(\.[a-z0-9_-]+)*\.(json|ya?ml|toml|ini|env|conf|cfg|properties|xml|txt|bak|backup|old)$/i,
+  /^(known_hosts|authorized_keys)$/i,
+  /^kubeconfig(\..+)?$/i,
+  /^service[-_]?account.*\.json$/i,
+  /^client[-_]?secrets?.*\.json$/i,
+  /\.(tfstate|tfvars)(\.backup)?$/i,
   /\.(sqlite3?|db)$/i,
   /\.gvbackup$/i,
 ];
@@ -322,6 +328,8 @@ export interface Chunk {
   fileKey: string;
   tf: Map<string, number>;
   len: number;
+  /** Lowercased names of the symbols declared inside this chunk (used to favour definitions over usages). */
+  defs?: string[];
 }
 
 export interface ScanResult {
@@ -380,7 +388,10 @@ export function buildFileChunks(file: FileEntry, fileKey: string, content: strin
       }
     }
     const c = makeChunk(file, fileKey, lines, start, end);
-    if (c) out.push(c);
+    if (c) {
+      c.defs = file.symbols.filter((s) => s.line - 1 >= start && s.line - 1 < end).map((s) => s.name.toLowerCase());
+      out.push(c);
+    }
     if (end >= lines.length) break;
     start = Math.max(start + 1, end - LIMITS.chunkOverlap);
   }
@@ -432,8 +443,65 @@ export function bm25Search(chunks: Chunk[], idx: Bm25Index, query: string, limit
     }
     if (score > 0) scored.push({ chunk, score });
   }
+  adjustForIntent(scored, query, terms);
   scored.sort((a, b2) => b2.score - a.score);
   return scored.slice(0, limit);
+}
+
+const TEST_PATH_RE = /(^|\/)(tests?|__tests__|spec)\/|\.(test|spec)\.[a-z0-9]+$/i;
+const DOC_PATH_RE = /\.(md|mdx|txt)$/i;
+const DOC_WORDS = new Set(['readme', 'doc', 'docs', 'documentation', 'guide', 'markdown', 'changelog']);
+
+export const isTestPath = (p: string): boolean => TEST_PATH_RE.test(p);
+
+/** camelCase / snake_case name -> lowercase parts ("buildGemmaMessages" -> build, gemma, messages). */
+function nameParts(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/[\s_$]+/)
+    .map((p) => p.toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * Re-weights BM25 scores for what the question is probably after, in place:
+ *  - a chunk that DECLARES a symbol the question names outranks chunks that merely use it;
+ *  - tests and documentation rank below the implementation unless the question is about them.
+ * Without this, short test files and READMEs (dense with the question's words) beat the real code.
+ */
+function adjustForIntent(scored: Array<{ chunk: Chunk; score: number }>, query: string, terms: string[]): void {
+  if (scored.length === 0) return;
+  const top = scored.reduce((m, s) => Math.max(m, s.score), 0);
+  // Lowercased query words -> whether the user typed them like an identifier (retryFailedPayment, snake_case).
+  const words = new Map<string, boolean>();
+  for (const w of query.match(/[A-Za-z_$][\w$]*/g) ?? []) {
+    if (w.length < 3) continue;
+    const identifierShaped = /[a-z][A-Z]/.test(w) || w.includes('_');
+    words.set(w.toLowerCase(), (words.get(w.toLowerCase()) ?? false) || identifierShaped);
+  }
+  const termSet = new Set(terms);
+  const testIntent = terms.some((t) => t.startsWith('test') || t === 'spec');
+  const docIntent = terms.some((t) => DOC_WORDS.has(t));
+  for (const s of scored) {
+    if (s.chunk.defs?.length) {
+      let boost = 0;
+      for (const d of s.chunk.defs) {
+        if (words.has(d)) {
+          // A deliberately typed identifier wins outright; an everyday word that merely equals a symbol
+          // name ("render", "name") gets a modest nudge, or common words would over-promote definitions.
+          boost = Math.max(boost, words.get(d) ? 1 : 0.6);
+          if (words.get(d)) break;
+          continue;
+        }
+        const parts = nameParts(d);
+        if (parts.length >= 2 && parts.every((p) => termSet.has(p))) boost = Math.max(boost, 0.25);
+      }
+      s.score += top * boost;
+    }
+    if (!testIntent && isTestPath(s.chunk.path)) s.score *= 0.65;
+    if (!docIntent && DOC_PATH_RE.test(s.chunk.path)) s.score *= 0.85;
+  }
 }
 
 /** Reciprocal rank fusion of several ranked lists of chunk ids. */
