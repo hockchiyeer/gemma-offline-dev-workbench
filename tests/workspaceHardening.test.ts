@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
-import { configuredRoots, isSystemFolder, resolveRoot, WorkspaceError } from '../server/workspace/safety.ts';
+import { configuredRoots, isInsideDir, isSystemFolder, resolveRoot, WorkspaceError } from '../server/workspace/safety.ts';
 import { filterDiffByDenied, findGitRoot, formatStatus, parseStatusZ, repoPrefix } from '../server/workspace/git.ts';
 import { createWorkspaceManager } from '../server/workspace/workspace.ts';
 import { isDeniedPath } from '../src/lib/workspaceCore.ts';
@@ -50,6 +50,19 @@ test('isSystemFolder: operating-system folders are recognised, look-alikes and r
   for (const ok of ['/usr/local/src/app', '/var/www/site', '/home/me/project', '/opt/app', '/srv/site', '/etcetera/app', '/library-stuff/app', '/procurement/app', '/tmp/x', 'C:\\Users\\me\\code', 'C:\\Windows2\\x', 'C:\\projects\\windows']) {
     assert.equal(isSystemFolder(ok), false, ok);
   }
+});
+
+test('isInsideDir handles Windows case-insensitivity and rejects look-alike sibling paths', () => {
+  assert.equal(isInsideDir('c:\\code', 'C:\\Code\\app', 'win32'), true);
+  assert.equal(isInsideDir('C:\\Code\\', 'c:\\code', 'win32'), true);
+  assert.equal(isInsideDir('c:/code', 'C:\\Code\\sub\\app', 'win32'), true);
+  assert.equal(isInsideDir('c:\\code', 'C:\\Code2\\app', 'win32'), false);
+  assert.equal(isInsideDir('c:\\code', 'D:\\code\\app', 'win32'), false);
+
+  assert.equal(isInsideDir('/home/dev/code', '/home/dev/code/app', 'linux'), true);
+  assert.equal(isInsideDir('/home/dev/code', '/home/dev/code/..foo', 'linux'), true);
+  assert.equal(isInsideDir('/home/dev/code', '/home/dev/Code/app', 'linux'), false);
+  assert.equal(isInsideDir('/home/dev/code', '/home/dev/code2/app', 'linux'), false);
 });
 
 test('resolveRoot refuses system folders, credential folders, the home directory and filesystem roots', () => {

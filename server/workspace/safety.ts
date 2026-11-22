@@ -45,7 +45,7 @@ export function resolveInside(rootReal: string, rel: string): string {
   } catch {
     throw new WorkspaceError('File not found.', 404);
   }
-  if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
+  if (!isInsideDir(rootReal, real)) {
     throw new WorkspaceError('Path escapes the project folder.', 403);
   }
   const relReal = path.relative(rootReal, real).split(path.sep).join('/');
@@ -70,10 +70,17 @@ export function isSystemFolder(real: string): boolean {
   return WINDOWS_SYSTEM_RE.test(`${norm}/`) || POSIX_SYSTEM_DIRS.some((d) => norm === d || norm.startsWith(`${d}/`));
 }
 
-function isInsideDir(root: string, candidate: string): boolean {
-  if (candidate === root) return true;
-  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
-  return candidate.startsWith(prefix);
+export function isInsideDir(root: string, candidate: string, platform: NodeJS.Platform = process.platform): boolean {
+  const sep = platform === 'win32' ? '\\' : '/';
+  const norm = (p: string) => {
+    const unified = platform === 'win32' ? p.replace(/\//g, '\\').toLowerCase() : p;
+    return unified.length > 1 && unified.endsWith(sep) ? unified.replace(/[\\/]+$/, '') : unified;
+  };
+  const r = norm(root);
+  const c = norm(candidate);
+  if (c === r) return true;
+  const prefix = r.endsWith(sep) ? r : `${r}${sep}`;
+  return c.startsWith(prefix);
 }
 
 /** Operator-configured roots (GEMMAVAULT_WORKSPACE_ROOTS, path-delimiter separated); empty means "any folder". */
@@ -97,7 +104,14 @@ export function resolveRoot(rawPath: string, opts: { allowedRoots?: string[] } =
   }
   if (!fs.statSync(real).isDirectory()) throw new WorkspaceError('That path is a file, not a folder.');
   if (path.parse(real).root === real) throw new WorkspaceError('Pick a project folder, not a drive or filesystem root.');
-  if (real === os.homedir()) throw new WorkspaceError('Pick a project folder inside your home directory, not the home directory itself.');
+  let homeReal = os.homedir();
+  try {
+    homeReal = fs.realpathSync(homeReal);
+  } catch {
+    // Keep os.homedir() if realpath fails.
+  }
+  const isHome = process.platform === 'win32' ? real.toLowerCase() === homeReal.toLowerCase() : real === homeReal;
+  if (isHome) throw new WorkspaceError('Pick a project folder inside your home directory, not the home directory itself.');
   if (isSystemFolder(real)) throw new WorkspaceError('That is an operating-system folder. Pick a project folder.', 403);
   if (real.split(/[\\/]/).some((seg) => CREDENTIAL_DIRS.has(seg.toLowerCase()))) {
     throw new WorkspaceError('That folder holds credentials (for example .ssh or .aws) and cannot be opened.', 403);
