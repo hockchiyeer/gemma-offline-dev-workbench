@@ -239,9 +239,12 @@ test('open a folder, @-mention a file, ask a question: the model receives the fi
       () => !!m.container.querySelector('[role="listbox"] [role="option"]'),
       'mention suggestions'
     );
-    const options = [...m.container.querySelectorAll('[role="option"]')].map((o) => textOf(o));
+    const optionEls = [...m.container.querySelectorAll('[role="option"]')];
+    const options = optionEls.map((o) => textOf(o));
     assert.ok(options[0].includes('src/payments.ts'), options.join(' | '));
     assert.equal(ta.getAttribute('aria-expanded'), 'true');
+    assert.equal(ta.getAttribute('aria-activedescendant'), optionEls[0].id);
+    assert.ok(optionEls.every((o) => (o as HTMLElement).tabIndex === -1), 'option buttons are excluded from Tab order');
 
     // Pick it with the keyboard.
     await act(async () => pressKey(ta, 'Enter'));

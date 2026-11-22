@@ -84,6 +84,7 @@ export const MentionPopup: React.FC<MentionPopupProps> = ({
                 <button
                   type="button"
                   role="option"
+                  tabIndex={-1}
                   id={mentionOptionId(idPrefix, idx)}
                   aria-selected={active}
                   onMouseDown={(e) => {
