@@ -1,5 +1,5 @@
 import React from 'react';
-import { BookOpen, Code2, FileCode2, Folder, GitBranch, Hash, Loader2 } from 'lucide-react';
+import { BookOpen, Code2, FileCode2, Folder, GitBranch, Hash, Loader2, X } from 'lucide-react';
 import type { MentionCandidate } from '../lib/workspaceContext';
 
 export function mentionOptionId(idPrefix: string, index: number): string {
@@ -13,6 +13,7 @@ interface MentionPopupProps {
   idPrefix: string;
   onSelect: (candidate: MentionCandidate) => void;
   onHover: (index: number) => void;
+  onDismiss: () => void;
 }
 
 const CategoryIcon: React.FC<{ category: MentionCandidate['category'] }> = ({ category }) => {
@@ -39,17 +40,30 @@ export const MentionPopup: React.FC<MentionPopupProps> = ({
   idPrefix,
   onSelect,
   onHover,
+  onDismiss,
 }) => {
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
-      <div className="flex items-center justify-between border-b border-slate-200/80 px-3 py-1.5 text-[11px] font-medium text-slate-500 dark:border-slate-800 dark:text-slate-400">
+      <div className="flex items-center justify-between gap-2 border-b border-slate-200/80 px-3 py-1.5 text-[11px] font-medium text-slate-500 dark:border-slate-800 dark:text-slate-400">
         <span>Attach project file, symbol, git context, snippet or doc</span>
-        {loading && (
-          <span className="inline-flex items-center gap-1 text-teal-600 dark:text-teal-400">
-            <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
-            Searching
-          </span>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          {loading && (
+            <span className="inline-flex items-center gap-1 text-teal-600 dark:text-teal-400">
+              <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+              Searching
+            </span>
+          )}
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={onDismiss}
+            aria-label="Close suggestions"
+            title="Close (Esc)"
+            className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+          >
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       {candidates.length === 0 ? (

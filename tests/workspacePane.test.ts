@@ -443,3 +443,43 @@ test('Cancel while Browse dialog is open closes the popup and resets the Browse 
     await m.unmount();
   }
 });
+
+test('MentionPopup close button dismisses suggestions without deleting @ from the input', async () => {
+  const root = await makeProject();
+  const m = await mount(baseSession());
+  try {
+    await openWorkspaceThroughUi(m, root);
+    const ta = textarea(m.container);
+
+    // Typing "@pay" opens the mention suggestions popup.
+    await act(async () => typeInto(ta, 'Contact @pay', 12));
+    await waitUntil(
+      () => !!m.container.querySelector('[role="listbox"] [role="option"]'),
+      'mention suggestions to appear'
+    );
+    const closeBtn = button(m.container, /Close suggestions/);
+    assert.ok(closeBtn, 'top-right close button is rendered');
+
+    // Clicking the [x] button dismisses the popup while preserving "@pay" verbatim in the textarea.
+    await act(async () => closeBtn.click());
+    assert.equal(m.container.querySelector('[role="listbox"]'), null, 'popup closes on [x] click');
+    assert.equal(ta.value, 'Contact @pay', 'the @ text remains untouched in the chat input');
+    assert.equal(ta.getAttribute('aria-expanded'), 'false');
+
+    // Continuing to type on the same dismissed @ token keeps the popup closed.
+    await act(async () => typeInto(ta, 'Contact @payments', 17));
+    await settle(180);
+    assert.equal(m.container.querySelector('[role="listbox"]'), null, 'popup stays dismissed for the same @ token');
+
+    // Typing a new @ token later in the same message reopens suggestions cleanly.
+    const nextText = 'Contact @payments and @pay';
+    await act(async () => typeInto(ta, nextText, nextText.length));
+    await waitUntil(
+      () => !!m.container.querySelector('[role="listbox"] [role="option"]'),
+      'popup reopens for a new @ mention'
+    );
+  } finally {
+    await m.unmount();
+  }
+});
+

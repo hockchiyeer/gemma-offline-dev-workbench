@@ -52,15 +52,19 @@ test('isSystemFolder: operating-system folders are recognised, look-alikes and r
   }
 });
 
-test('isInsideDir handles Windows case-insensitivity and rejects look-alike sibling paths', () => {
+test('isInsideDir handles Windows case-insensitivity, normalises .. segments, and rejects look-alike sibling paths', () => {
   assert.equal(isInsideDir('c:\\code', 'C:\\Code\\app', 'win32'), true);
   assert.equal(isInsideDir('C:\\Code\\', 'c:\\code', 'win32'), true);
   assert.equal(isInsideDir('c:/code', 'C:\\Code\\sub\\app', 'win32'), true);
   assert.equal(isInsideDir('c:\\code', 'C:\\Code2\\app', 'win32'), false);
   assert.equal(isInsideDir('c:\\code', 'D:\\code\\app', 'win32'), false);
+  assert.equal(isInsideDir('c:\\code', 'C:\\Code\\..\\Windows', 'win32'), false);
+  assert.equal(isInsideDir('c:\\code', 'C:\\Code\\sub\\..\\app', 'win32'), true);
 
   assert.equal(isInsideDir('/home/dev/code', '/home/dev/code/app', 'linux'), true);
   assert.equal(isInsideDir('/home/dev/code', '/home/dev/code/..foo', 'linux'), true);
+  assert.equal(isInsideDir('/home/dev/code', '/home/dev/code/../secrets', 'linux'), false);
+  assert.equal(isInsideDir('/home/dev/code', '/home/dev/code/..', 'linux'), false);
   assert.equal(isInsideDir('/home/dev/code', '/home/dev/Code/app', 'linux'), false);
   assert.equal(isInsideDir('/home/dev/code', '/home/dev/code2/app', 'linux'), false);
 });

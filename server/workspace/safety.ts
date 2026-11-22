@@ -71,16 +71,16 @@ export function isSystemFolder(real: string): boolean {
 }
 
 export function isInsideDir(root: string, candidate: string, platform: NodeJS.Platform = process.platform): boolean {
-  const sep = platform === 'win32' ? '\\' : '/';
+  const pathMod = platform === 'win32' ? path.win32 : path.posix;
   const norm = (p: string) => {
-    const unified = platform === 'win32' ? p.replace(/\//g, '\\').toLowerCase() : p;
-    return unified.length > 1 && unified.endsWith(sep) ? unified.replace(/[\\/]+$/, '') : unified;
+    const resolved = pathMod.resolve(p);
+    return platform === 'win32' ? resolved.toLowerCase() : resolved;
   };
   const r = norm(root);
   const c = norm(candidate);
   if (c === r) return true;
-  const prefix = r.endsWith(sep) ? r : `${r}${sep}`;
-  return c.startsWith(prefix);
+  const rel = pathMod.relative(r, c);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${pathMod.sep}`) && !pathMod.isAbsolute(rel);
 }
 
 /** Operator-configured roots (GEMMAVAULT_WORKSPACE_ROOTS, path-delimiter separated); empty means "any folder". */

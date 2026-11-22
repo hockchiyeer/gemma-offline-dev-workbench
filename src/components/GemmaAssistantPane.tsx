@@ -2087,6 +2087,10 @@ export const GemmaAssistantPane: React.FC<GemmaAssistantPaneProps> = ({
                     idPrefix={mentionId}
                     onSelect={selectMention}
                     onHover={setMentionIndex}
+                    onDismiss={() => {
+                      if (mention) setDismissedAt(mention.start);
+                      textareaRef.current?.focus();
+                    }}
                   />
                 </div>
               )}
